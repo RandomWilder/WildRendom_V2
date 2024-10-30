@@ -1,3 +1,4 @@
+#scripts/migrate_db.py
 from pathlib import Path
 import sys
 import argparse
@@ -11,8 +12,10 @@ from flask import Flask
 from src.shared import db, migrate as flask_migrate  # Renamed the import
 from src.shared.config import config
 from src.user_service.models.user import User
-from src.raffle_service.models.user_raffle_stats import UserRaffleStats
 from src.raffle_service.models import InstantWin
+# Add these imports
+from src.prize_service.models import Prize, PrizePool, PrizeAllocation, PrizePoolAllocation
+from src.prize_service.models.prize import PrizeType, PrizeStatus, PrizeTier
 
 def init_migrations(app):
     """Initialize migrations directory if it doesn't exist"""
@@ -41,10 +44,10 @@ def run_migrations(generate=False):
         try:
             if generate:
                 print("Generating migration for model changes...")
-                from flask_migrate import init, migrate, stamp
+                from flask_migrate import migrate, stamp
                 
                 # Create an initial migration
-                migrate(directory='migrations', message='add instant wins')
+                migrate(directory='migrations', message='add prize service tables')
                 
                 # Get the database synchronized with the first migration
                 stamp(directory='migrations', revision='head')

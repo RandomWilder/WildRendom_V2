@@ -21,6 +21,9 @@ class InstantWin(db.Model):
     raffle_id = db.Column(db.Integer, db.ForeignKey('raffles.id', ondelete='RESTRICT'), nullable=False)
     ticket_id = db.Column(db.Integer, db.ForeignKey('tickets.id', ondelete='RESTRICT'), nullable=False)
     
+    # Add the relationship (though it will be managed by the backref from Ticket)
+    ticket = db.relationship('Ticket', backref=db.backref('instant_win_entry', lazy=True, uselist=False))
+    
     # Prize placeholder (for Prize Service integration)
     prize_reference = db.Column(db.String(100), nullable=False)
     

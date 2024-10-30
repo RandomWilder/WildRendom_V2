@@ -1,13 +1,14 @@
 # src/raffle_service/services/instant_win_service.py
 
 from typing import Optional, Tuple, List, Dict
-from datetime import datetime, timezone
+from datetime import datetime, timezone, timedelta
 from sqlalchemy.exc import SQLAlchemyError
 from sqlalchemy import func
 from src.shared import db
 from src.raffle_service.models import Raffle, Ticket, InstantWin, InstantWinStatus
 from src.raffle_service.models.ticket import TicketStatus
 from src.raffle_service.models.raffle import RaffleStatus
+from src.prize_service.models import PrizeAllocation, AllocationType, ClaimStatus
 
 class InstantWinService:
     @staticmethod
@@ -60,9 +61,7 @@ class InstantWinService:
     
     @staticmethod
     def check_instant_win(ticket_id: int) -> Tuple[Optional[InstantWin], Optional[str]]:
-        """
-        Check if a ticket is an instant winner when purchased
-        """
+        """Check if a ticket is an instant winner when purchased"""
         try:
             instant_win = InstantWin.query.filter_by(
                 ticket_id=ticket_id,
@@ -71,12 +70,27 @@ class InstantWinService:
             
             if instant_win:
                 instant_win.discover()
+                
+                # Create prize allocation
+                allocation = PrizeAllocation(
+                    prize_id=1,  # We'll need to get this from prize pool
+                    pool_id=2,   # We'll need to get this from instant win configuration
+                    allocation_type=AllocationType.INSTANT_WIN.value,
+                    reference_type='ticket',
+                    reference_id=str(ticket_id),
+                    winner_user_id=instant_win.ticket.user_id,
+                    won_at=datetime.now(timezone.utc),
+                    claim_status=ClaimStatus.PENDING.value,
+                    claim_deadline=datetime.now(timezone.utc) + timedelta(days=1),
+                    created_by_id=instant_win.ticket.user_id
+                )
+                
+                db.session.add(allocation)
                 db.session.commit()
                 
-                # Here we would trigger an event for Prize Service
-                # For now, we'll just return the instant win
+                return instant_win, None
                 
-            return instant_win, None
+            return None, None
             
         except SQLAlchemyError as e:
             db.session.rollback()

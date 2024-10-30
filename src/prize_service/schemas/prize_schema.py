@@ -1,10 +1,13 @@
 # src/prize_service/schemas/prize_schema.py
 
-from marshmallow import Schema, fields, validate, validates_schema, ValidationError
-from src.prize_service.models import PrizeType, PrizeStatus, PrizeTier, ClaimStatus
+from marshmallow import Schema, fields, validate, validates_schema, ValidationError, EXCLUDE
+from src.prize_service.models import PrizeType, PrizeStatus, PrizeTier, AllocationStrategy
 
 class PrizeCreateSchema(Schema):
     """Schema for creating a new prize"""
+    class Meta:
+        unknown = EXCLUDE
+
     name = fields.Str(required=True, validate=validate.Length(min=3, max=100))
     description = fields.Str(validate=validate.Length(max=1000))
     type = fields.Str(required=True, validate=validate.OneOf([t.value for t in PrizeType]))
@@ -22,34 +25,49 @@ class PrizeCreateSchema(Schema):
 
 class PrizePoolCreateSchema(Schema):
     """Schema for creating a prize pool"""
+    class Meta:
+        unknown = EXCLUDE
+
     name = fields.Str(required=True, validate=validate.Length(min=3, max=100))
     description = fields.Str(validate=validate.Length(max=1000))
     start_date = fields.DateTime(required=True)
     end_date = fields.DateTime(required=True)
     budget_limit = fields.Decimal(places=2)
-    allocation_rules = fields.Dict()
-    win_limits = fields.Dict()
-    eligibility_rules = fields.Dict()
+    allocation_rules = fields.Dict(required=False)
+    win_limits = fields.Dict(required=False)
+    eligibility_rules = fields.Dict(required=False)
+    allocation_strategy = fields.Str(required=True, validate=validate.OneOf(
+        [s.value for s in AllocationStrategy]
+    ))
 
     @validates_schema
     def validate_dates(self, data, **kwargs):
+        """Validate date relationships"""
         if data['start_date'] >= data['end_date']:
             raise ValidationError('end_date must be after start_date')
 
 class PrizeClaimSchema(Schema):
     """Schema for prize claims"""
+    class Meta:
+        unknown = EXCLUDE
+
     claim_method = fields.Str(required=True, validate=validate.OneOf(['prize', 'cash', 'credit']))
     shipping_address = fields.Dict(required=False)  # Only for physical prizes
 
 class PrizeAllocationCreateSchema(Schema):
     """Schema for creating prize allocations"""
+    class Meta:
+        unknown = EXCLUDE
+
     prize_id = fields.Int(required=True)
     quantity = fields.Int(required=True, validate=validate.Range(min=1))
     allocation_rules = fields.Dict(required=False)
-    # Remove pool_id as it comes from the URL
 
 class PrizeResponseSchema(Schema):
     """Schema for prize responses"""
+    class Meta:
+        unknown = EXCLUDE
+
     id = fields.Int()
     name = fields.Str()
     description = fields.Str()
@@ -67,6 +85,9 @@ class PrizeResponseSchema(Schema):
 
 class ClaimResponseSchema(Schema):
     """Schema for claim responses"""
+    class Meta:
+        unknown = EXCLUDE
+
     allocation_id = fields.Int()
     status = fields.Str()
     claim_method = fields.Str()

@@ -4,6 +4,7 @@ from flask import Blueprint, request, jsonify
 from src.shared.auth import token_required, admin_required
 from src.prize_service.services.prize_service import PrizeService
 from src.prize_service.services.claim_service import ClaimService
+from src.raffle_service.models import InstantWin
 from src.prize_service.schemas.prize_schema import (
     PrizeClaimSchema, PrizeResponseSchema, ClaimResponseSchema
 )
@@ -15,6 +16,15 @@ prize_bp = Blueprint('prize', __name__, url_prefix='/api/prizes')
 def initiate_claim(allocation_id):
     """Initiate a prize claim"""
     try:
+        # Get the instant win record
+        instant_win = InstantWin.query.get(allocation_id)
+        if not instant_win:
+            return jsonify({'error': 'Instant win not found'}), 404
+            
+        # Verify ownership
+        if instant_win.ticket.user_id != request.current_user.id:
+            return jsonify({'error': 'Not authorized to claim this prize'}), 403
+            
         claim_info, error = ClaimService.initiate_claim(
             allocation_id=allocation_id,
             user_id=request.current_user.id

@@ -1,9 +1,12 @@
+# src/raffle_service/routes/raffle_routes.py
 from flask import Blueprint, request, jsonify, current_app
 from src.shared.auth import token_required, admin_required
 from src.raffle_service.services.raffle_service import RaffleService
 from src.raffle_service.services.ticket_service import TicketService
 from src.raffle_service.services.purchase_limit_service import PurchaseLimitService
 from src.raffle_service.models.raffle import RaffleStatus
+from src.raffle_service.models import InstantWin
+from src.user_service.services.user_service import UserService
 from datetime import datetime
 from marshmallow import ValidationError
 
@@ -65,20 +68,41 @@ def purchase_tickets(raffle_id):
                 'error': f'Maximum purchase is {raffle_config.MAX_TICKETS_PER_TRANSACTION} tickets per transaction'
             }), 400
 
+        # Get raffle to check price
+        raffle, error = RaffleService.get_raffle(raffle_id)
+        if error:
+            return jsonify({'error': error}), 400
+
+        # Calculate total cost
+        total_cost = raffle.ticket_price * quantity
+
+        # Process credit transaction first
+        user, error = UserService.update_credits(
+            user_id=request.current_user.id,
+            amount=total_cost,
+            transaction_type='subtract',
+            reference_type='raffle_purchase',
+            reference_id=str(raffle_id),
+            notes=f'Purchase of {quantity} tickets for Raffle ID: {raffle_id}'
+        )
+        
+        if error:
+            return jsonify({'error': error}), 400
+
+        # Get the latest transaction ID for this user
+        transactions = UserService.get_user_credit_transactions(request.current_user.id)[0]
+        transaction_id = transactions[0]['id'] if transactions else None
+
         # Check purchase limits
         allowed, error_message = PurchaseLimitService.check_purchase_limit(
             user_id=request.current_user.id,
             raffle_id=raffle_id,
-            requested_quantity=quantity,
-            max_tickets=raffle_config.MAX_TICKETS_PER_TRANSACTION
+            requested_quantity=quantity
         )
         
         if not allowed:
             return jsonify({'error': error_message}), 400
 
-        # In a real application, we'd handle the credit transaction here
-        transaction_id = 1  # This should come from credit transaction
-        
         tickets, error = RaffleService.purchase_tickets(
             raffle_id=raffle_id,
             user_id=request.current_user.id,
@@ -87,6 +111,15 @@ def purchase_tickets(raffle_id):
         )
         
         if error:
+            # If ticket creation fails, refund the credits
+            UserService.update_credits(
+                user_id=request.current_user.id,
+                amount=total_cost,
+                transaction_type='add',
+                reference_type='raffle_purchase_refund',
+                reference_id=str(raffle_id),
+                notes=f'Refund for failed ticket purchase in Raffle ID: {raffle_id}'
+            )
             return jsonify({'error': error}), 400
         
         # Update purchase count after successful purchase
@@ -115,3 +148,15 @@ def get_my_tickets():
         return jsonify({'error': error}), 400
         
     return jsonify([ticket.to_dict() for ticket in tickets])
+
+@raffle_bp.route('/<int:raffle_id>/instant-wins', methods=['GET'])
+@token_required
+def get_raffle_instant_wins(raffle_id):
+    """Get instant wins for a raffle"""
+    try:
+        instant_wins = InstantWin.query.filter_by(raffle_id=raffle_id).all()
+        if not instant_wins:
+            return jsonify([])
+        return jsonify([win.to_dict() for win in instant_wins])
+    except Exception as e:
+        return jsonify({'error': str(e)}), 500

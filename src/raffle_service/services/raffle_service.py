@@ -173,7 +173,13 @@ class RaffleService:
                 return None, "Can only update draft or coming soon raffles"
 
             # Update allowed fields
-            for key in ['title', 'description', 'ticket_price', 'start_time', 'end_time']:
+            allowed_fields = [
+                'title', 'description', 'ticket_price', 
+                'start_time', 'end_time', 'prize_pool_id',
+                'instant_win_count', 'draw_prize_count'
+            ]
+            
+            for key in allowed_fields:
                 if key in data:
                     if key in ['start_time', 'end_time']:
                         try:

@@ -11,7 +11,7 @@ from src.raffle_service.models.ticket import Ticket
 from src.raffle_service.models import InstantWin
 from src.user_service.models.user import User
 
-admin_bp = Blueprint('admin', __name__)
+admin_bp = Blueprint('raffle_admin', __name__, url_prefix='/api/admin/raffles')
 logger = logging.getLogger(__name__)
 if not logger.handlers:
     handler = logging.StreamHandler()
@@ -221,4 +221,101 @@ def get_raffle_tickets(raffle_id):
         })
         
     except Exception as e:
+        return jsonify({'error': str(e)}), 500
+    
+@admin_bp.route('/raffles/<int:raffle_id>/configure-prizes', methods=['PUT'])
+@admin_required
+def configure_raffle_prizes(raffle_id):
+    """Configure prizes for a raffle"""
+    try:
+        data = request.get_json()
+        if not data:
+            return jsonify({'error': "Prize configuration is required"}), 400
+            
+        # Validate required fields
+        required_fields = ['pool_id', 'instant_win_count', 'draw_prize_count']
+        if not all(field in data for field in required_fields):
+            return jsonify({
+                'error': f"Missing required fields: {', '.join(required_fields)}"
+            }), 400
+            
+        raffle, error = RaffleService.update_raffle(
+            raffle_id=raffle_id,
+            data={
+                'prize_pool_id': data['pool_id'],
+                'instant_win_count': data['instant_win_count'],
+                'draw_prize_count': data['draw_prize_count']
+            },
+            admin_id=request.current_user.id
+        )
+        
+        if error:
+            return jsonify({'error': error}), 400
+            
+        return jsonify(raffle.to_dict())
+        
+    except Exception as e:
+        logger.error(f"Error configuring raffle prizes: {str(e)}")
+        return jsonify({'error': str(e)}), 500
+
+@admin_bp.route('/raffles/<int:raffle_id>/prize-config', methods=['GET'])
+@admin_required
+def get_raffle_prize_config(raffle_id):
+    """Get prize configuration for a raffle"""
+    try:
+        raffle, error = RaffleService.get_raffle(raffle_id)
+        if error:
+            return jsonify({'error': error}), 404
+            
+        config = {
+            'prize_pool_id': raffle.prize_pool_id if hasattr(raffle, 'prize_pool_id') else None,
+            'instant_win_count': raffle.instant_win_count,
+            'draw_prize_count': getattr(raffle, 'draw_prize_count', 0),
+            'total_prize_count': raffle.total_prize_count
+        }
+            
+        return jsonify(config)
+        
+    except Exception as e:
+        logger.error(f"Error getting raffle prize config: {str(e)}")
+        return jsonify({'error': str(e)}), 500
+    
+@admin_bp.route('/raffles/<int:raffle_id>/link-prize-pool', methods=['POST'])
+@admin_required
+def link_raffle_prize_pool(raffle_id):
+    """Link a prize pool to a raffle"""
+    try:
+        data = request.get_json()
+        if not data or 'pool_id' not in data:
+            return jsonify({'error': "pool_id is required"}), 400
+
+        # Get raffle and verify status
+        raffle = RaffleService.get_raffle(raffle_id)[0]
+        if not raffle:
+            return jsonify({'error': "Raffle not found"}), 404
+            
+        if raffle.status not in ['draft', 'coming_soon']:
+            return jsonify({'error': "Can only link prize pool in draft or coming soon status"}), 400
+
+        # Update raffle with prize pool configuration
+        configuration = data.get('configuration', {})
+        update_data = {
+            'prize_pool_id': data['pool_id'],
+            'instant_win_count': configuration.get('instant_win_count', 0),
+            'draw_prize_count': configuration.get('draw_prize_count', 0)
+        }
+
+        raffle, error = RaffleService.update_raffle(
+            raffle_id=raffle_id,
+            data=update_data,
+            admin_id=request.current_user.id
+        )
+        
+        if error:
+            return jsonify({'error': error}), 400
+            
+        return jsonify(raffle.to_dict())
+        
+    except Exception as e:
+        logger.error(f"Error linking prize pool to raffle: {str(e)}")
         return jsonify({'error': str(e)}), 500

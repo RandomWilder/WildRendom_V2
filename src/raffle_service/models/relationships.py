@@ -22,6 +22,11 @@ Raffle.instant_wins = db.relationship('InstantWin',
                                     lazy='dynamic',
                                     cascade='save-update')  # Preserve records for audit
 
+# Update the ticket relationship
+Ticket.instant_win = db.relationship('InstantWin',
+                                   backref=db.backref('ticket', lazy=True),
+                                   uselist=False)  # One-to-one relationship
+
 Ticket.instant_win_entry = db.relationship('InstantWin',
                                          backref=db.backref('ticket', lazy=True),
                                          uselist=False,  # One-to-one relationship

@@ -32,31 +32,24 @@ def cleanup_system():
             if proc.info['name'] == 'python.exe':
                 cmdline = proc.info['cmdline']
                 if cmdline and any('wildrandom' in str(cmd).lower() for cmd in cmdline):
-                    logging.info(f"Terminating process {proc.pid}")
-                    proc.terminate()
-                    proc.wait(timeout=3)
+                    if proc.pid != os.getpid():  # Don't kill ourselves
+                        logging.info(f"Terminating process {proc.pid}")
+                        proc.terminate()
+                        proc.wait(timeout=3)
         except (psutil.NoSuchProcess, psutil.AccessDenied, psutil.TimeoutExpired):
             continue
 
     # Wait a moment for processes to terminate
     time.sleep(2)
     
-    # Try to remove the database file if it exists
+    # Only try to close any open database connections
     if db_path.exists():
         try:
-            # Try to close any open database connections
-            try:
-                conn = sqlite3.connect(db_path)
-                conn.close()
-            except:
-                pass
-            
-            os.remove(db_path)
-            logging.info(f"Removed existing database: {db_path}")
-        except PermissionError:
-            logging.warning("Could not remove database file - will try to continue anyway")
+            conn = sqlite3.connect(db_path)
+            conn.close()
+            logging.info(f"Closed any open connections to database: {db_path}")
         except Exception as e:
-            logging.warning(f"Error removing database: {e}")
+            logging.warning(f"Error managing database connections: {e}")
 
 def is_port_in_use(port):
     """Check if a port is in use"""
@@ -122,17 +115,19 @@ def main():
     project_root = Path(__file__).parent.parent
     os.chdir(project_root)
     
-    # Clean up any existing processes and files
+    # Clean up any existing processes
     cleanup_system()
     
     # Create data directory if it doesn't exist
     data_dir = project_root / 'data'
     data_dir.mkdir(exist_ok=True)
     
-    # Initialize database
-    if not initialize_database():
-        return
-
+    # Initialize database only if it doesn't exist
+    db_path = data_dir / 'wildrandom.db'
+    if not db_path.exists():
+        if not initialize_database():
+            return
+    
     # Start Flask application
     app_process = start_flask_app()
     

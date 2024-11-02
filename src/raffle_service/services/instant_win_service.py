@@ -8,7 +8,7 @@ from src.shared import db
 from src.raffle_service.models import Raffle, Ticket, InstantWin, InstantWinStatus
 from src.raffle_service.models.ticket import TicketStatus
 from src.raffle_service.models.raffle import RaffleStatus
-from src.prize_service.models import PrizeAllocation, AllocationType, ClaimStatus
+from src.prize_service.models import PrizeAllocation, AllocationType, ClaimStatus, PrizePool
 
 class InstantWinService:
     @staticmethod
@@ -30,24 +30,24 @@ class InstantWinService:
             if existing_count > 0:
                 return None, "Instant wins already allocated for this raffle"
             
-            # Get random available tickets
+            # Get random available tickets that are marked as eligible
             available_tickets = Ticket.query.filter_by(
                 raffle_id=raffle_id,
-                status=TicketStatus.AVAILABLE.value
+                status=TicketStatus.AVAILABLE.value,
+                instant_win_eligible=True
             ).order_by(func.random()).limit(count).all()
             
             if len(available_tickets) < count:
-                return None, f"Not enough available tickets. Requested {count}, found {len(available_tickets)}"
+                return None, f"Not enough eligible tickets. Requested {count}, found {len(available_tickets)}"
             
             instant_wins = []
             for ticket in available_tickets:
                 instant_win = InstantWin(
                     raffle_id=raffle_id,
                     ticket_id=ticket.id,
-                    prize_reference=f"instant_win_{raffle_id}_{ticket.id}"  # Placeholder for Prize Service
+                    prize_reference=f"instant_win_{raffle_id}_{ticket.id}"  # Will be replaced with actual prize in Phase 2
                 )
                 instant_wins.append(instant_win)
-                # Mark ticket as instant win
                 ticket.instant_win = True
             
             db.session.bulk_save_objects(instant_wins)
@@ -61,33 +61,16 @@ class InstantWinService:
     
     @staticmethod
     def check_instant_win(ticket_id: int) -> Tuple[Optional[InstantWin], Optional[str]]:
-        """Check if a ticket is an instant winner when purchased"""
+        """Check if a ticket is an instant winner when revealed"""
         try:
             instant_win = InstantWin.query.filter_by(
                 ticket_id=ticket_id,
                 status=InstantWinStatus.ALLOCATED.value
             ).first()
             
-            if instant_win:
-                instant_win.discover()
-                
-                # Create prize allocation
-                allocation = PrizeAllocation(
-                    prize_id=1,  # We'll need to get this from prize pool
-                    pool_id=2,   # We'll need to get this from instant win configuration
-                    allocation_type=AllocationType.INSTANT_WIN.value,
-                    reference_type='ticket',
-                    reference_id=str(ticket_id),
-                    winner_user_id=instant_win.ticket.user_id,
-                    won_at=datetime.now(timezone.utc),
-                    claim_status=ClaimStatus.PENDING.value,
-                    claim_deadline=datetime.now(timezone.utc) + timedelta(days=1),
-                    created_by_id=instant_win.ticket.user_id
-                )
-                
-                db.session.add(allocation)
+            if instant_win and not instant_win.discovered_at:  # Only discover if not already discovered
+                instant_win.discover()  # This sets discovered_at and updates status
                 db.session.commit()
-                
                 return instant_win, None
                 
             return None, None
@@ -99,7 +82,7 @@ class InstantWinService:
     @staticmethod
     def initiate_claim(instant_win_id: int, user_id: int) -> Tuple[Optional[Dict], Optional[str]]:
         """
-        Initiate claim process (will be handled by Prize Service)
+        Initiate claim process for an instant win
         """
         try:
             instant_win = InstantWin.query.get(instant_win_id)
@@ -109,16 +92,32 @@ class InstantWinService:
             if instant_win.status != InstantWinStatus.DISCOVERED.value:
                 return None, f"Invalid instant win status: {instant_win.status}"
             
+            # Add check for ticket ownership
+            if instant_win.ticket.user_id != user_id:
+                return None, "Not authorized to claim this prize"
+            
+            # Get prize details from raffle configuration
+            raffle = Raffle.query.get(instant_win.raffle_id)
+            if not raffle:
+                return None, "Raffle not found"
+            
             # Mark as pending claim
-            instant_win.mark_pending_claim()
+            instant_win.status = InstantWinStatus.PENDING.value
+            
+            # Set claim deadline (24 hours from discovery)
+            current_time = datetime.now(timezone.utc)
+            claim_deadline = current_time + timedelta(hours=24)
+            instant_win.claim_deadline = claim_deadline
+            
             db.session.commit()
             
-            # Return claim information (to be used by Prize Service)
+            # Return claim information
             return {
                 'instant_win_id': instant_win.id,
                 'prize_reference': instant_win.prize_reference,
-                'user_id': user_id,
-                'claim_deadline': instant_win.claim_deadline.isoformat()
+                'claim_deadline': claim_deadline.isoformat(),
+                'raffle_id': raffle.id,
+                'ticket_id': instant_win.ticket_id
             }, None
             
         except SQLAlchemyError as e:
@@ -156,3 +155,24 @@ class InstantWinService:
             
         except SQLAlchemyError as e:
             return None, str(e)
+
+    @staticmethod
+    def expire_stale_claims():
+        """Expire unclaimed instant wins past their deadline"""
+        try:
+            current_time = datetime.now(timezone.utc)
+            
+            stale_wins = InstantWin.query.filter(
+                InstantWin.status == InstantWinStatus.PENDING_CLAIM.value,
+                InstantWin.claim_deadline < current_time
+            ).all()
+            
+            for win in stale_wins:
+                win.mark_expired()
+            
+            db.session.commit()
+            return len(stale_wins), None
+            
+        except SQLAlchemyError as e:
+            db.session.rollback()
+            return 0, str(e)

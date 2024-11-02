@@ -9,7 +9,7 @@ from sqlalchemy import Index, UniqueConstraint
 class InstantWinStatus(str, Enum):
     ALLOCATED = 'allocated'      # Assigned to ticket, not yet discovered
     DISCOVERED = 'discovered'    # User bought winning ticket
-    PENDING_CLAIM = 'pending'    # User notified, hasn't claimed
+    PENDING = 'pending'         # User notified, hasn't claimed
     CLAIMED = 'claimed'         # User has claimed prize
     EXPIRED = 'expired'         # Claim window expired
 
@@ -52,8 +52,8 @@ class InstantWin(db.Model):
         """Prevent invalid status transitions"""
         valid_transitions = {
             InstantWinStatus.ALLOCATED.value: [InstantWinStatus.DISCOVERED.value],
-            InstantWinStatus.DISCOVERED.value: [InstantWinStatus.PENDING_CLAIM.value, InstantWinStatus.EXPIRED.value],
-            InstantWinStatus.PENDING_CLAIM.value: [InstantWinStatus.CLAIMED.value, InstantWinStatus.EXPIRED.value],
+            InstantWinStatus.DISCOVERED.value: [InstantWinStatus.PENDING.value, InstantWinStatus.EXPIRED.value],
+            InstantWinStatus.PENDING.value: [InstantWinStatus.CLAIMED.value, InstantWinStatus.EXPIRED.value],
             InstantWinStatus.CLAIMED.value: [],  # Terminal state
             InstantWinStatus.EXPIRED.value: []   # Terminal state
         }
@@ -73,7 +73,7 @@ class InstantWin(db.Model):
     
     def mark_pending_claim(self):
         """Mark instant win as pending claim (waiting for Prize Service)"""
-        self.status = InstantWinStatus.PENDING_CLAIM.value
+        self.status = InstantWinStatus.PENDING.value
     
     def mark_claimed(self):
         """Mark instant win as claimed (Prize Service confirmed)"""

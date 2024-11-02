@@ -4,8 +4,9 @@ from src.shared.auth import token_required, admin_required
 from src.raffle_service.services.raffle_service import RaffleService
 from src.raffle_service.services.ticket_service import TicketService
 from src.raffle_service.services.purchase_limit_service import PurchaseLimitService
+from src.raffle_service.services.instant_win_service import InstantWinService
 from src.raffle_service.models.raffle import RaffleStatus
-from src.raffle_service.models import InstantWin
+from src.raffle_service.models import InstantWin, Ticket
 from src.user_service.services.user_service import UserService
 from datetime import datetime
 from marshmallow import ValidationError
@@ -158,5 +159,92 @@ def get_raffle_instant_wins(raffle_id):
         if not instant_wins:
             return jsonify([])
         return jsonify([win.to_dict() for win in instant_wins])
+    except Exception as e:
+        return jsonify({'error': str(e)}), 500
+    
+@raffle_bp.route('/<int:raffle_id>/tickets/reveal', methods=['POST'])
+@token_required
+def reveal_tickets(raffle_id):
+    """Reveal purchased tickets"""
+    try:
+        data = request.get_json()
+        ticket_ids = data.get('ticket_ids', [])
+        
+        if not ticket_ids:
+            return jsonify({'error': 'No tickets specified for reveal'}), 400
+
+        revealed_tickets, error = TicketService.reveal_tickets(
+            user_id=request.current_user.id,
+            ticket_ids=ticket_ids
+        )
+        
+        if error:
+            return jsonify({'error': error}), 400
+            
+        return jsonify([ticket.to_dict() for ticket in revealed_tickets]), 200
+        
+    except Exception as e:
+        return jsonify({'error': str(e)}), 500
+
+@raffle_bp.route('/<int:raffle_id>/tickets/revealed', methods=['GET'])
+@token_required
+def get_revealed_tickets(raffle_id):
+    """Get user's revealed tickets for a raffle"""
+    try:
+        tickets, error = TicketService.get_revealed_tickets(
+            user_id=request.current_user.id,
+            raffle_id=raffle_id
+        )
+        
+        if error:
+            return jsonify({'error': error}), 400
+            
+        return jsonify([ticket.to_dict() for ticket in tickets]), 200
+        
+    except Exception as e:
+        return jsonify({'error': str(e)}), 500
+
+@raffle_bp.route('/<int:raffle_id>/instant-wins/claim', methods=['POST'])
+@token_required
+def claim_instant_win(raffle_id):
+    """Initiate claim for an instant win"""
+    try:
+        data = request.get_json()
+        instant_win_id = data.get('instant_win_id')
+        
+        if not instant_win_id:
+            return jsonify({'error': 'instant_win_id is required'}), 400
+            
+        # Verify ownership
+        instant_win = InstantWin.query.get(instant_win_id)
+        if not instant_win or instant_win.ticket.user_id != request.current_user.id:
+            return jsonify({'error': 'Not authorized to claim this prize'}), 403
+
+        claim_info, error = InstantWinService.initiate_claim(
+            instant_win_id=instant_win_id,
+            user_id=request.current_user.id
+        )
+        
+        if error:
+            return jsonify({'error': error}), 400
+            
+        return jsonify(claim_info), 200
+        
+    except Exception as e:
+        return jsonify({'error': str(e)}), 500
+
+@raffle_bp.route('/<int:raffle_id>/instant-wins/status', methods=['GET'])
+@token_required
+def get_instant_win_status(raffle_id):
+    """Get instant win status for user's tickets"""
+    try:
+        # Get user's tickets for this raffle that are instant wins
+        instant_wins = InstantWin.query.join(Ticket).filter(
+            InstantWin.raffle_id == raffle_id,
+            Ticket.user_id == request.current_user.id
+        ).all()
+        
+        return jsonify([win.to_dict() for win in instant_wins]), 200
+        
     except Exception as e:
         return jsonify({'error': str(e)}), 500

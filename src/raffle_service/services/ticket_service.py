@@ -1,4 +1,5 @@
 # src/raffle_service/services/ticket_service.py
+
 from typing import Optional, Tuple, List, Dict, Any
 from datetime import datetime, timezone
 from sqlalchemy.exc import SQLAlchemyError
@@ -66,66 +67,6 @@ class TicketService:
             return None, str(e)
 
     @staticmethod
-    def get_raffle_statistics(raffle_id: int) -> Tuple[Optional[Dict[str, Any]], Optional[str]]:
-        """Get ticket statistics for a raffle"""
-        try:
-            stats = {
-                'total_tickets': 0,
-                'available_tickets': 0,
-                'sold_tickets': 0,
-                'void_tickets': 0,
-                'cancelled_tickets': 0,
-                'total_sales': 0.0,
-                'total_instant_wins': 0,
-                'available_instant_wins': 0,
-                'claimed_instant_wins': 0,
-                'unique_participants': 0,  # New field
-                'tickets_available_for_sale': 0  # New field
-            }
-            
-            raffle = Raffle.query.get(raffle_id)
-            if not raffle:
-                return None, "Raffle not found"
-
-            # Get counts for each status
-            tickets = Ticket.query.filter_by(raffle_id=raffle_id).all()
-            
-            # Get unique participants count
-            unique_participants = db.session.query(func.count(distinct(Ticket.user_id)))\
-                .filter(
-                    Ticket.raffle_id == raffle_id,
-                    Ticket.user_id.isnot(None)
-                ).scalar()
-            
-            stats['unique_participants'] = unique_participants or 0
-            
-            for ticket in tickets:
-                stats['total_tickets'] += 1
-                if ticket.status == TicketStatus.AVAILABLE.value:
-                    stats['available_tickets'] += 1
-                    if ticket.instant_win:
-                        stats['available_instant_wins'] += 1
-                elif ticket.status == TicketStatus.SOLD.value:
-                    stats['sold_tickets'] += 1
-                    stats['total_sales'] += raffle.ticket_price
-                    if ticket.instant_win:
-                        stats['claimed_instant_wins'] += 1
-                elif ticket.status == TicketStatus.VOID.value:
-                    stats['void_tickets'] += 1
-                elif ticket.status == TicketStatus.CANCELLED.value:
-                    stats['cancelled_tickets'] += 1
-                
-                if ticket.instant_win:
-                    stats['total_instant_wins'] += 1
-            
-            # Calculate tickets available for sale
-            stats['tickets_available_for_sale'] = stats['available_tickets']
-
-            return stats, None
-        except SQLAlchemyError as e:
-            return None, str(e)
-
-    @staticmethod
     def bulk_cancel_tickets(raffle_id: int) -> Tuple[Optional[int], Optional[str]]:
         """Cancel all unsold tickets for a raffle"""
         try:
@@ -144,13 +85,11 @@ class TicketService:
         except SQLAlchemyError as e:
             db.session.rollback()
             return None, str(e)
-        
+
     @staticmethod
     def purchase_tickets(user_id: int, raffle_id: int, quantity: int, transaction_id: int = None) -> Tuple[Optional[List[Ticket]], Optional[str]]:
         """Purchase tickets for a raffle"""
         try:
-            # Existing validation code...
-            
             # Get available tickets randomly
             available_tickets = Ticket.query.filter_by(
                 raffle_id=raffle_id,
@@ -163,7 +102,6 @@ class TicketService:
             # Update tickets
             purchase_time = datetime.now(timezone.utc)
             purchased_tickets = []
-            instant_wins_found = []
 
             for ticket in available_tickets:
                 ticket.user_id = user_id
@@ -171,12 +109,8 @@ class TicketService:
                 ticket.purchase_time = purchase_time
                 ticket.transaction_id = transaction_id
                 purchased_tickets.append(ticket)
-                
-                # Check for instant win
-                if ticket.instant_win:
-                    instant_win, error = InstantWinService.check_instant_win(ticket.id)
-                    if instant_win and not error:
-                        instant_wins_found.append(instant_win)
+                # Note: We keep instant_win and instant_win_eligible as is,
+                # but don't check for wins yet
 
             # Update purchase count
             success, error = PurchaseLimitService.update_purchase_count(
@@ -190,16 +124,148 @@ class TicketService:
                 return None, error
 
             db.session.commit()
-            
-            # If instant wins were found, we should trigger notifications
-            # This will be handled by the Prize Service in the future
-            if instant_wins_found:
-                for win in instant_wins_found:
-                    # TODO: Trigger notification to Prize Service
-                    pass
-            
             return purchased_tickets, None
 
         except SQLAlchemyError as e:
             db.session.rollback()
             return None, f"Database error: {str(e)}"
+
+    @staticmethod
+    def reveal_tickets(user_id: int, ticket_ids: List[str]) -> Tuple[Optional[List[Ticket]], Optional[str]]:
+        """Reveal multiple tickets for a user"""
+        try:
+            # Get tickets and verify ownership in one query
+            tickets = Ticket.query.filter(
+                Ticket.ticket_id.in_(ticket_ids),
+                Ticket.user_id == user_id,
+                Ticket.status == TicketStatus.SOLD.value,
+                Ticket.is_revealed == False
+            ).order_by(Ticket.ticket_id).with_for_update().all()
+
+            if not tickets:
+                return None, "No eligible tickets found"
+
+            # Get current highest reveal sequence for this raffle
+            max_sequence = db.session.query(func.max(Ticket.reveal_sequence))\
+                .filter(Ticket.raffle_id == tickets[0].raffle_id)\
+                .scalar() or 0
+
+            revealed_tickets = []
+            instant_wins_found = []
+
+            for i, ticket in enumerate(tickets, start=1):
+                if ticket.reveal():
+                    ticket.reveal_sequence = max_sequence + i
+                    revealed_tickets.append(ticket)
+                    
+                    # Check for instant wins only during reveal
+                    if ticket.instant_win_eligible and ticket.instant_win:
+                        instant_win, error = InstantWinService.check_instant_win(ticket.id)
+                        if instant_win and not error:
+                            instant_wins_found.append(instant_win)
+
+            db.session.commit()
+            return revealed_tickets, None
+
+        except SQLAlchemyError as e:
+            db.session.rollback()
+            return None, str(e)
+
+    @staticmethod
+    def get_revealed_tickets(user_id: int, raffle_id: int) -> Tuple[Optional[List[Ticket]], Optional[str]]:
+        """Get all revealed tickets for a user in a raffle"""
+        try:
+            tickets = Ticket.query.filter(
+                Ticket.raffle_id == raffle_id,
+                Ticket.user_id == user_id,
+                Ticket.is_revealed == True
+            ).order_by(Ticket.reveal_sequence).all()
+
+            return tickets, None
+
+        except SQLAlchemyError as e:
+            return None, str(e)
+
+    @staticmethod
+    def mark_instant_win_eligible(raffle_id: int, count: int) -> Tuple[Optional[List[Ticket]], Optional[str]]:
+        """Mark tickets as instant win eligible during raffle setup"""
+        try:
+            # Get random available tickets
+            eligible_tickets = Ticket.query.filter(
+                Ticket.raffle_id == raffle_id,
+                Ticket.status == TicketStatus.AVAILABLE.value,
+                Ticket.instant_win_eligible == False
+            ).order_by(func.random()).limit(count).all()
+
+            if len(eligible_tickets) < count:
+                return None, f"Not enough available tickets. Found {len(eligible_tickets)}, needed {count}"
+
+            for ticket in eligible_tickets:
+                ticket.mark_instant_win_eligible()
+
+            db.session.commit()
+            return eligible_tickets, None
+
+        except SQLAlchemyError as e:
+            db.session.rollback()
+            return None, str(e)
+
+    @staticmethod
+    def get_raffle_statistics(raffle_id: int) -> Tuple[Optional[Dict[str, Any]], Optional[str]]:
+        """Get ticket statistics for a raffle"""
+        try:
+            stats = {
+                'total_tickets': 0,
+                'available_tickets': 0,
+                'sold_tickets': 0,
+                'revealed_tickets': 0,
+                'eligible_tickets': 0,
+                'instant_wins_found': 0,
+                'void_tickets': 0,
+                'cancelled_tickets': 0,
+                'total_sales': 0.0,
+                'unique_participants': 0,
+                'tickets_available_for_sale': 0
+            }
+            
+            raffle = Raffle.query.get(raffle_id)
+            if not raffle:
+                return None, "Raffle not found"
+
+            # Get tickets with all states
+            tickets = Ticket.query.filter_by(raffle_id=raffle_id).all()
+            
+            # Get unique participants count
+            unique_participants = db.session.query(func.count(distinct(Ticket.user_id)))\
+                .filter(
+                    Ticket.raffle_id == raffle_id,
+                    Ticket.user_id.isnot(None)
+                ).scalar()
+            
+            stats['unique_participants'] = unique_participants or 0
+            
+            for ticket in tickets:
+                stats['total_tickets'] += 1
+                
+                if ticket.status == TicketStatus.AVAILABLE.value:
+                    stats['available_tickets'] += 1
+                elif ticket.status == TicketStatus.SOLD.value:
+                    stats['sold_tickets'] += 1
+                    stats['total_sales'] += raffle.ticket_price
+                    if ticket.is_revealed:
+                        stats['revealed_tickets'] += 1
+                elif ticket.status == TicketStatus.VOID.value:
+                    stats['void_tickets'] += 1
+                elif ticket.status == TicketStatus.CANCELLED.value:
+                    stats['cancelled_tickets'] += 1
+                
+                if ticket.instant_win_eligible:
+                    stats['eligible_tickets'] += 1
+            
+            # Calculate tickets available for sale
+            stats['tickets_available_for_sale'] = stats['available_tickets']
+
+            return stats, None
+
+        except SQLAlchemyError as e:
+            return None, str(e)

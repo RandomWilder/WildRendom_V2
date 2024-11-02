@@ -1,135 +1,78 @@
 # src/prize_service/services/claim_service.py
 
 from typing import Optional, Tuple, Dict
-from datetime import datetime, timezone, timedelta
+from datetime import datetime, timezone
 from sqlalchemy.exc import SQLAlchemyError
 from src.shared import db
-from src.prize_service.models import (
-    Prize, PrizeAllocation, ClaimStatus, 
-    PrizeStatus, AllocationType
-)
+from src.raffle_service.models import InstantWin, InstantWinStatus
+from src.prize_service.models import Prize
+from src.user_service.services.user_service import UserService
 
 class ClaimService:
     @staticmethod
-    def initiate_claim(
-        allocation_id: int,
-        user_id: int
-    ) -> Tuple[Optional[Dict], Optional[str]]:
-        """Initiate the claim process for a prize"""
-        try:
-            allocation = PrizeAllocation.query.get(allocation_id)
-            if not allocation:
-                return None, "Prize allocation not found"
-                
-            if allocation.winner_user_id != user_id:
-                return None, "Not authorized to claim this prize"
-                
-            if allocation.claim_status != ClaimStatus.PENDING.value:
-                return None, f"Prize not claimable. Status: {allocation.claim_status}"
-
-            prize = Prize.query.get(allocation.prize_id)
-            if not prize:
-                return None, "Prize not found"
-
-            claim_info = {
-                'allocation_id': allocation.id,
-                'prize_name': prize.name,
-                'prize_type': prize.type,
-                'claim_options': {
-                    'prize': float(prize.retail_value),
-                    'cash': float(prize.cash_value),
-                    'credit': float(prize.credit_value)
-                },
-                'claim_deadline': allocation.claim_deadline.isoformat()
-            }
-            
-            return claim_info, None
-
-        except SQLAlchemyError as e:
-            return None, str(e)
-
-    @staticmethod
-    def process_claim(
-        allocation_id: int,
+    def process_instant_win_claim(
+        instant_win_id: int,
         user_id: int,
         claim_method: str
-    ) -> Tuple[Optional[PrizeAllocation], Optional[str]]:
-        """Process a claim choice and initiate fulfillment"""
-        try:
-            allocation = PrizeAllocation.query.get(allocation_id)
-            if not allocation:
-                return None, "Prize allocation not found"
-
-            prize = Prize.query.get(allocation.prize_id)
-            if not prize:
-                return None, "Prize not found"
-
-            # Validate claim method
-            valid_methods = ['prize', 'cash', 'credit']
-            if claim_method not in valid_methods:
-                return None, f"Invalid claim method. Must be one of: {valid_methods}"
-
-            # Update allocation with claim choice
-            allocation.claim_method = claim_method
-            allocation.claim_status = ClaimStatus.APPROVED.value
-            allocation.value_claimed = getattr(prize, f'{claim_method}_value')
-            allocation.claimed_at = datetime.now(timezone.utc)
-
-            db.session.commit()
-
-            # TODO: Trigger fulfillment process based on claim method
-            # This will integrate with future fulfillment service
-
-            return allocation, None
-
-        except SQLAlchemyError as e:
-            db.session.rollback()
-            return None, str(e)
-
-    @staticmethod
-    def check_claim_status(
-        allocation_id: int,
-        user_id: int
     ) -> Tuple[Optional[Dict], Optional[str]]:
-        """Check the status of a prize claim"""
+        """Process an instant win claim"""
         try:
-            allocation = PrizeAllocation.query.get(allocation_id)
-            if not allocation:
-                return None, "Prize allocation not found"
+            # Get instant win record
+            instant_win = InstantWin.query.get(instant_win_id)
+            if not instant_win:
+                return None, "Instant win not found"
 
-            if allocation.winner_user_id != user_id:
-                return None, "Not authorized to view this claim"
+            # Verify ownership
+            if instant_win.ticket.user_id != user_id:
+                return None, "Not authorized to claim this prize"
 
-            status_info = {
-                'status': allocation.claim_status,
-                'claimed_at': allocation.claimed_at.isoformat() if allocation.claimed_at else None,
-                'claim_method': allocation.claim_method,
-                'value_claimed': float(allocation.value_claimed) if allocation.value_claimed else None,
-                'deadline': allocation.claim_deadline.isoformat() if allocation.claim_deadline else None
-            }
+            # Verify status
+            if instant_win.status != InstantWinStatus.PENDING.value:
+                return None, f"Invalid instant win status: {instant_win.status} (must be pending)"
 
-            return status_info, None
+            # Only handle credit claims for now
+            if claim_method != 'credit':
+                return None, "Only credit claims are supported at this time"
 
-        except SQLAlchemyError as e:
-            return None, str(e)
+            # Get the prize details
+            try:
+                prize_id = int(instant_win.prize_reference)  # Convert prize reference to ID
+                prize = Prize.query.get(prize_id)
+                if not prize:
+                    return None, "Prize configuration not found"
+                
+                prize_value = float(prize.credit_value)  # Convert Decimal to float
+            except (ValueError, AttributeError):
+                return None, "Invalid prize configuration"
 
-    @staticmethod
-    def expire_stale_claims() -> Tuple[int, Optional[str]]:
-        """Expire claims that have passed their deadline"""
-        try:
-            current_time = datetime.now(timezone.utc)
-            expired_count = PrizeAllocation.query.filter(
-                and_(
-                    PrizeAllocation.claim_status == ClaimStatus.PENDING.value,
-                    PrizeAllocation.claim_deadline < current_time
-                )
-            ).update({
-                'claim_status': ClaimStatus.EXPIRED.value
-            })
+            # Use the existing credit system to award the prize
+            _, error = UserService.update_credits(
+                user_id=user_id,
+                amount=prize_value,
+                transaction_type='add',
+                reference_type='prize_claim',
+                reference_id=str(instant_win_id),
+                notes=f'Prize claim for {prize.name} (ID:{prize.id}) worth {prize_value} credits'
+            )
 
+            if error:
+                return None, f"Failed to process credit claim: {error}"
+
+            # Update instant win status
+            instant_win.status = InstantWinStatus.CLAIMED.value
+            prize.total_claimed += 1  # Update prize claim counter
             db.session.commit()
-            return expired_count, None
+
+            return {
+                'instant_win_id': instant_win_id,
+                'prize_id': prize.id,
+                'prize_name': prize.name,
+                'claim_method': claim_method,
+                'claimed_at': datetime.now(timezone.utc).isoformat(),
+                'status': InstantWinStatus.CLAIMED.value,
+                'prize_value': prize_value
+            }, None
 
         except SQLAlchemyError as e:
             db.session.rollback()
-            return 0, str(e)
+            return None, str(e)

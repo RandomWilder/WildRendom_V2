@@ -2,7 +2,7 @@
 from typing import Optional, Tuple, List, Dict, Any
 from datetime import datetime, timezone
 from sqlalchemy.exc import SQLAlchemyError
-from sqlalchemy import and_
+from sqlalchemy import and_, or_, func
 import logging
 from src.shared import db
 from src.raffle_service.models import Raffle, RaffleStatus, Ticket, TicketStatus
@@ -14,6 +14,7 @@ from src.raffle_service.models import (
     InstantWin, InstantWinStatus
 )
 from src.raffle_service.services.instant_win_service import InstantWinService
+from src.prize_service.models import PrizePool, PoolStatus
 
 # Status transition definitions
 VALID_STATUS_TRANSITIONS = {
@@ -47,8 +48,8 @@ VALID_STATUS_TRANSITIONS = {
 
 class RaffleService:
     @staticmethod
-    def _generate_tickets(raffle_id: int, total_tickets: int) -> bool:
-        """Generate tickets for a raffle"""
+    def _generate_tickets(raffle_id: int, total_tickets: int, instant_win_count: int = 0, prize_pool_id: Optional[int] = None) -> bool:
+        """Generate tickets for a raffle with instant win configuration"""
         try:
             tickets = []
             for i in range(total_tickets):
@@ -56,12 +57,33 @@ class RaffleService:
                 ticket = Ticket(
                     raffle_id=raffle_id,
                     ticket_number=ticket_number,
-                    status=TicketStatus.AVAILABLE.value
+                    status=TicketStatus.AVAILABLE.value,
+                    instant_win=False,
+                    instant_win_eligible=False
                 )
                 tickets.append(ticket)
             
             db.session.bulk_save_objects(tickets)
             db.session.commit()
+
+            if instant_win_count > 0 and prize_pool_id:
+                # Verify prize pool
+                pool = PrizePool.query.get(prize_pool_id)
+                if not pool or pool.status != PoolStatus.LOCKED.value:
+                    return False
+                
+                # Mark random tickets as instant win eligible
+                eligible_tickets = Ticket.query.filter_by(
+                    raffle_id=raffle_id,
+                    status=TicketStatus.AVAILABLE.value
+                ).order_by(func.random()).limit(instant_win_count).all()
+
+                for ticket in eligible_tickets:
+                    ticket.instant_win_eligible = True
+                    ticket.instant_win = True
+
+                db.session.commit()
+
             return True
         except SQLAlchemyError:
             db.session.rollback()
@@ -89,6 +111,15 @@ class RaffleService:
             if start_time >= end_time:
                 return None, "End time must be after start time"
 
+            # Validate prize pool if specified
+            prize_pool_id = data.get('prize_pool_id')
+            if prize_pool_id:
+                pool = PrizePool.query.get(prize_pool_id)
+                if not pool:
+                    return None, "Prize pool not found"
+                if pool.status != PoolStatus.LOCKED.value:
+                    return None, "Prize pool must be locked before use"
+
             # Validate instant win configuration
             instant_win_count = data.get('instant_win_count', 0)
             total_prize_count = data.get('total_prize_count', 1)
@@ -112,18 +143,24 @@ class RaffleService:
             db.session.add(raffle)
             db.session.commit()
             
-            # Generate tickets
-            if not RaffleService._generate_tickets(raffle.id, raffle.total_tickets):
+            # Generate tickets with instant win configuration
+            if not RaffleService._generate_tickets(
+                raffle.id,
+                raffle.total_tickets,
+                instant_win_count,
+                prize_pool_id
+            ):
                 db.session.delete(raffle)
                 db.session.commit()
                 return None, "Failed to generate tickets"
 
             # Handle instant win allocation if configured
-            if instant_win_count > 0:
+            if instant_win_count > 0 and prize_pool_id:
                 instant_wins, error = InstantWinService.allocate_instant_wins(
                     raffle_id=raffle.id,
                     count=instant_win_count
                 )
+                
                 if error:
                     db.session.delete(raffle)
                     db.session.commit()

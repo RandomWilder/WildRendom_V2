@@ -2,6 +2,7 @@
 
 from flask import Blueprint, request, jsonify
 from src.shared.auth import admin_required
+from src.shared import db
 from src.prize_service.services.prize_service import PrizeService
 from src.prize_service.services.claim_service import ClaimService
 from src.prize_service.models import Prize, PrizePool, PrizePoolAllocation
@@ -72,6 +73,23 @@ def create_pool_allocation(pool_id: int):  # Added pool_id parameter
             return jsonify({'error': error}), 400
             
         return jsonify(allocation.to_dict()), 201
+        
+    except Exception as e:
+        return jsonify({'error': str(e)}), 500
+
+@admin_bp.route('/pools/<int:pool_id>/lock', methods=['POST'])  # Changed to POST and separate endpoint
+@admin_required
+def lock_pool(pool_id):
+    """Lock a prize pool"""
+    try:
+        pool = PrizePool.query.get(pool_id)
+        if not pool:
+            return jsonify({'error': 'Prize pool not found'}), 404
+
+        pool.lock_pool()
+        db.session.commit()
+        
+        return jsonify(pool.to_dict())
         
     except Exception as e:
         return jsonify({'error': str(e)}), 500

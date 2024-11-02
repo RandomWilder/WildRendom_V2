@@ -5,6 +5,7 @@ from src.shared.auth import token_required, admin_required
 from src.prize_service.services.prize_service import PrizeService
 from src.prize_service.services.claim_service import ClaimService
 from src.raffle_service.models import InstantWin
+from src.prize_service.models import Prize, PrizePool, PrizeAllocation
 from src.prize_service.schemas.prize_schema import (
     PrizeClaimSchema, PrizeResponseSchema, ClaimResponseSchema
 )
@@ -38,16 +39,16 @@ def initiate_claim(allocation_id):
     except Exception as e:
         return jsonify({'error': str(e)}), 500
 
-@prize_bp.route('/claims/<int:allocation_id>/process', methods=['POST'])
+@prize_bp.route('/instant-wins/<int:instant_win_id>/claims', methods=['POST'])
 @token_required
-def process_claim(allocation_id):
-    """Process a prize claim"""
+def process_instant_win_claim(instant_win_id):
+    """Process an instant win prize claim"""
     try:
         schema = PrizeClaimSchema()
         data = schema.load(request.get_json())
         
-        allocation, error = ClaimService.process_claim(
-            allocation_id=allocation_id,
+        result, error = ClaimService.process_instant_win_claim(
+            instant_win_id=instant_win_id,
             user_id=request.current_user.id,
             claim_method=data['claim_method']
         )
@@ -55,7 +56,7 @@ def process_claim(allocation_id):
         if error:
             return jsonify({'error': error}), 400
             
-        return jsonify(ClaimResponseSchema().dump(allocation))
+        return jsonify(result)
         
     except Exception as e:
         return jsonify({'error': str(e)}), 500
@@ -91,6 +92,27 @@ def get_my_prizes():
             return jsonify({'error': error}), 400
             
         return jsonify([PrizeResponseSchema().dump(p) for p in prizes])
+        
+    except Exception as e:
+        return jsonify({'error': str(e)}), 500
+
+@prize_bp.route('/instant-wins/<int:instant_win_id>/claim', methods=['POST'])
+@token_required
+def claim_instant_win(instant_win_id):
+    """Process an instant win prize claim"""
+    try:
+        data = request.get_json()
+        
+        result, error = ClaimService.process_instant_win_claim(
+            instant_win_id=instant_win_id,
+            user_id=request.current_user.id,
+            claim_method=data.get('claim_method')
+        )
+        
+        if error:
+            return jsonify({'error': error}), 400
+            
+        return jsonify(result), 200
         
     except Exception as e:
         return jsonify({'error': str(e)}), 500

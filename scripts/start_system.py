@@ -1,4 +1,5 @@
 # scripts/start_system.py
+
 import os
 import sys
 from pathlib import Path
@@ -11,7 +12,12 @@ from datetime import datetime
 import socket
 import sqlite3
 
-# Setup logging
+# Fix path resolution
+current_dir = Path(__file__).resolve().parent
+project_root = current_dir.parent
+sys.path.append(str(project_root))  # Add project root to Python path
+os.chdir(project_root)  # Change working directory to project root
+
 logging.basicConfig(
     level=logging.INFO,
     format='%(asctime)s - %(levelname)s - %(message)s',
@@ -21,28 +27,26 @@ logging.basicConfig(
     ]
 )
 
+logger = logging.getLogger(__name__)
+
 def cleanup_system():
     """Clean up any existing processes and locked files"""
-    project_root = Path(__file__).parent.parent
     db_path = project_root / 'data' / 'wildrandom.db'
     
-    # Kill any Python processes running our application
     for proc in psutil.process_iter(['pid', 'name', 'cmdline']):
         try:
             if proc.info['name'] == 'python.exe':
                 cmdline = proc.info['cmdline']
                 if cmdline and any('wildrandom' in str(cmd).lower() for cmd in cmdline):
-                    if proc.pid != os.getpid():  # Don't kill ourselves
+                    if proc.pid != os.getpid():
                         logging.info(f"Terminating process {proc.pid}")
                         proc.terminate()
                         proc.wait(timeout=3)
         except (psutil.NoSuchProcess, psutil.AccessDenied, psutil.TimeoutExpired):
             continue
 
-    # Wait a moment for processes to terminate
     time.sleep(2)
     
-    # Only try to close any open database connections
     if db_path.exists():
         try:
             conn = sqlite3.connect(db_path)
@@ -51,107 +55,37 @@ def cleanup_system():
         except Exception as e:
             logging.warning(f"Error managing database connections: {e}")
 
-def is_port_in_use(port):
-    """Check if a port is in use"""
-    with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as s:
-        try:
-            s.bind(('0.0.0.0', port))
-            return False
-        except socket.error:
-            return True
-
-def start_flask_app():
-    """Start the Flask application"""
+def run_app():
+    """Run Flask application"""
     try:
-        # Set up environment variables
-        env = os.environ.copy()
-        env['FLASK_APP'] = 'app.py'
-        env['FLASK_ENV'] = 'development'
-        env['APP_PORT'] = '5001'  # Changed from FLASK_RUN_PORT
-        env['FLASK_RUN_HOST'] = '0.0.0.0'
-
-        # Start the Flask application
-        cmd = [sys.executable, '-c', 
-               'from app import run_app; run_app(port=5001)']
-        process = subprocess.Popen(
-            cmd,
-            env=env,
-            stdout=subprocess.PIPE,
-            stderr=subprocess.PIPE
-        )
-
-        # Wait for the application to start
-        time.sleep(2)
+        # Import here after path is set up
+        from app import create_app
         
-        if process.poll() is None:
-            logging.info("Flask application started successfully on port 5001")
-            return process
-        else:
-            stdout, stderr = process.communicate()
-            logging.error(f"Flask application failed to start: {stderr.decode()}")
-            return None
-
+        app = create_app()
+        logger.info("Created Flask application successfully")
+        app.run(host='0.0.0.0', port=5001, debug=True)
     except Exception as e:
-        logging.error(f"Error starting Flask application: {str(e)}")
-        return None
-
-def initialize_database():
-    """Initialize or reset the database"""
-    try:
-        result = subprocess.run(
-            [sys.executable, 'scripts/create_db.py'],
-            capture_output=True,
-            text=True,
-            check=True
-        )
-        logging.info("Database initialized successfully")
-        return True
-    except subprocess.CalledProcessError as e:
-        logging.error(f"Database initialization failed: {e.stderr}")
+        logger.error(f"Error running Flask app: {str(e)}")
+        import traceback
+        logger.error(traceback.format_exc())  # Print full traceback
         return False
+    return True
 
 def main():
-    # Set up project root
-    project_root = Path(__file__).parent.parent
-    os.chdir(project_root)
-    
-    # Clean up any existing processes
-    cleanup_system()
-    
     # Create data directory if it doesn't exist
     data_dir = project_root / 'data'
     data_dir.mkdir(exist_ok=True)
     
-    # Initialize database only if it doesn't exist
-    db_path = data_dir / 'wildrandom.db'
-    if not db_path.exists():
-        if not initialize_database():
-            return
+    # Clean up any existing processes
+    cleanup_system()
     
-    # Start Flask application
-    app_process = start_flask_app()
+    # Set environment variables
+    os.environ['FLASK_APP'] = str(project_root / 'app.py')
+    os.environ['FLASK_ENV'] = 'development'
+    os.environ['APP_PORT'] = '5001'
     
-    if not app_process:
-        logging.error("Failed to start the application")
-        return
-
-    logging.info("System started successfully")
-    logging.info("Press Ctrl+C to shutdown")
-
-    try:
-        while True:
-            if app_process.poll() is not None:
-                logging.error("Flask application has stopped unexpectedly")
-                break
-            time.sleep(1)
-    except KeyboardInterrupt:
-        logging.info("Shutting down...")
-        app_process.terminate()
-        try:
-            app_process.wait(timeout=5)
-        except subprocess.TimeoutExpired:
-            app_process.kill()
-        logging.info("System shutdown complete")
+    logger.info(f"Starting Flask application from {project_root}")
+    run_app()
 
 if __name__ == "__main__":
     main()

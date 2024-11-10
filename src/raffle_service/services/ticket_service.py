@@ -9,6 +9,13 @@ from src.shared import db
 from src.raffle_service.models import Ticket, TicketStatus, Raffle, RaffleStatus
 from src.raffle_service.services.purchase_limit_service import PurchaseLimitService
 from src.raffle_service.services.instant_win_service import InstantWinService 
+import logging
+logger = logging.getLogger(__name__)
+from src.raffle_service.models import (
+    Ticket, TicketStatus, 
+    Raffle, RaffleStatus,
+    UserRaffleStats
+)
 
 class TicketService:
     @staticmethod
@@ -88,47 +95,85 @@ class TicketService:
 
     @staticmethod
     def purchase_tickets(user_id: int, raffle_id: int, quantity: int, transaction_id: int = None) -> Tuple[Optional[List[Ticket]], Optional[str]]:
-        """Purchase tickets for a raffle"""
+        """Purchase tickets for a raffle with proper transaction management"""
         try:
-            # Get available tickets randomly
-            available_tickets = Ticket.query.filter_by(
-                raffle_id=raffle_id,
-                status=TicketStatus.AVAILABLE.value
-            ).order_by(func.random()).limit(quantity).all()
+            # Start an outer transaction
+            with db.session.begin_nested():
+                # 1. Check purchase limit first (moved from routes)
+                allowed, error = PurchaseLimitService.check_purchase_limit(
+                    user_id=user_id,
+                    raffle_id=raffle_id,
+                    requested_quantity=quantity
+                )
+                if not allowed:
+                    return None, error
 
-            if len(available_tickets) < quantity:
-                return None, "Not enough tickets available"
+                # 2. Get available tickets with locking
+                available_tickets = Ticket.query.filter_by(
+                    raffle_id=raffle_id,
+                    status=TicketStatus.AVAILABLE.value
+                ).with_for_update().order_by(func.random()).limit(quantity).all()
 
-            # Update tickets
-            purchase_time = datetime.now(timezone.utc)
-            purchased_tickets = []
+                if len(available_tickets) < quantity:
+                    return None, "Not enough tickets available"
 
-            for ticket in available_tickets:
-                ticket.user_id = user_id
-                ticket.status = TicketStatus.SOLD.value
-                ticket.purchase_time = purchase_time
-                ticket.transaction_id = transaction_id
-                purchased_tickets.append(ticket)
-                # Note: We keep instant_win and instant_win_eligible as is,
-                # but don't check for wins yet
+                # 3. Update tickets
+                purchase_time = datetime.now(timezone.utc)
+                purchased_tickets = []
 
-            # Update purchase count
-            success, error = PurchaseLimitService.update_purchase_count(
-                user_id=user_id,
-                raffle_id=raffle_id,
-                quantity=quantity
+                for ticket in available_tickets:
+                    ticket.user_id = user_id
+                    ticket.status = TicketStatus.SOLD.value
+                    ticket.purchase_time = purchase_time
+                    ticket.transaction_id = transaction_id
+                    purchased_tickets.append(ticket)
+
+                # 4. Update purchase count only after we know we have the tickets
+                success, error = PurchaseLimitService.update_purchase_count(
+                    user_id=user_id,
+                    raffle_id=raffle_id,
+                    quantity=quantity
+                )
+                
+                if not success:
+                    # This will trigger rollback of the nested transaction
+                    raise SQLAlchemyError(f"Failed to update purchase count: {error}")
+
+                # 5. Verify final state
+                final_count = sum(1 for t in Ticket.query.filter_by(
+                    raffle_id=raffle_id,
+                    user_id=user_id,
+                    status=TicketStatus.SOLD.value
+                ).all())
+
+                stats = UserRaffleStats.query.filter_by(
+                    user_id=user_id,
+                    raffle_id=raffle_id
+                ).first()
+
+                if stats.tickets_purchased != final_count:
+                    raise SQLAlchemyError(
+                        f"Purchase count mismatch. Stats: {stats.tickets_purchased}, "
+                        f"Actual: {final_count}"
+                    )
+
+            # Outer transaction commits here if everything succeeded
+            db.session.commit()
+            
+            logger.info(
+                f"Successfully purchased {quantity} tickets for user {user_id} "
+                f"in raffle {raffle_id}. Transaction ID: {transaction_id}"
             )
             
-            if not success:
-                db.session.rollback()
-                return None, error
-
-            db.session.commit()
             return purchased_tickets, None
 
         except SQLAlchemyError as e:
             db.session.rollback()
-            return None, f"Database error: {str(e)}"
+            logger.error(
+                f"Failed to purchase tickets: {str(e)}. "
+                f"User: {user_id}, Raffle: {raffle_id}, Quantity: {quantity}"
+            )
+            return None, f"Failed to complete purchase: {str(e)}"
 
     @staticmethod
     def reveal_tickets(user_id: int, ticket_ids: List[str]) -> Tuple[Optional[List[Ticket]], Optional[str]]:
@@ -269,3 +314,44 @@ class TicketService:
 
         except SQLAlchemyError as e:
             return None, str(e)
+        
+    @staticmethod
+    def fix_purchase_count_discrepancy(user_id: int, raffle_id: int) -> Tuple[bool, Optional[str]]:
+        """Fix discrepancy between actual tickets and purchase count"""
+        try:
+            with db.session.begin_nested():
+                # Get actual ticket count
+                actual_count = Ticket.query.filter_by(
+                    raffle_id=raffle_id,
+                    user_id=user_id,
+                    status=TicketStatus.SOLD.value
+                ).count()
+
+                # Get or create stats
+                stats = UserRaffleStats.query.filter_by(
+                    user_id=user_id,
+                    raffle_id=raffle_id
+                ).first()
+
+                if not stats:
+                    stats = UserRaffleStats(
+                        user_id=user_id,
+                        raffle_id=raffle_id,
+                        tickets_purchased=0
+                    )
+                    db.session.add(stats)
+
+                if stats.tickets_purchased != actual_count:
+                    old_count = stats.tickets_purchased
+                    stats.tickets_purchased = actual_count
+                    logger.info(
+                        f"Fixed purchase count for user {user_id} in raffle {raffle_id}. "
+                        f"Old: {old_count}, New: {actual_count}"
+                    )
+
+            db.session.commit()
+            return True, None
+
+        except SQLAlchemyError as e:
+            db.session.rollback()
+            return False, str(e)

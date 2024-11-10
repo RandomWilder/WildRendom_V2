@@ -1,10 +1,10 @@
 # src/prize_service/routes/prize_routes.py
 
-from flask import Blueprint, request, jsonify
+from flask import Blueprint, request, jsonify, current_app
 from src.shared.auth import token_required, admin_required
 from src.prize_service.services.prize_service import PrizeService
 from src.prize_service.services.claim_service import ClaimService
-from src.raffle_service.models import InstantWin
+from src.raffle_service.models import InstantWin, Ticket
 from src.prize_service.models import Prize, PrizePool, PrizeAllocation
 from src.prize_service.schemas.prize_schema import (
     PrizeClaimSchema, PrizeResponseSchema, ClaimResponseSchema
@@ -42,15 +42,20 @@ def initiate_claim(allocation_id):
 @prize_bp.route('/instant-wins/<int:instant_win_id>/claims', methods=['POST'])
 @token_required
 def process_instant_win_claim(instant_win_id):
-    """Process an instant win prize claim"""
+    """Process an instant win prize claim with value selection"""
     try:
-        schema = PrizeClaimSchema()
-        data = schema.load(request.get_json())
+        data = request.get_json()
+        claim_method = data.get('claim_method', 'credit')
+        selected_value = data.get('value_type')  # New: value selection
         
+        if not selected_value:
+            return jsonify({'error': 'Value selection is required'}), 400
+            
         result, error = ClaimService.process_instant_win_claim(
             instant_win_id=instant_win_id,
             user_id=request.current_user.id,
-            claim_method=data['claim_method']
+            claim_method=claim_method,
+            value_type=selected_value
         )
         
         if error:
@@ -61,10 +66,24 @@ def process_instant_win_claim(instant_win_id):
     except Exception as e:
         return jsonify({'error': str(e)}), 500
 
+@prize_bp.route('/claims/<int:allocation_id>/values', methods=['GET'])
+@token_required
+def get_prize_values(allocation_id):
+    """Get available value options for a prize"""
+    try:
+        values, error = PrizeService.get_prize_values(allocation_id)
+        if error:
+            return jsonify({'error': error}), 400
+            
+        return jsonify(values)
+        
+    except Exception as e:
+        return jsonify({'error': str(e)}), 500
+
 @prize_bp.route('/claims/<int:allocation_id>/status', methods=['GET'])
 @token_required
 def check_claim_status(allocation_id):
-    """Check claim status"""
+    """Check status of a prize claim"""
     try:
         status, error = ClaimService.check_claim_status(
             allocation_id=allocation_id,
@@ -102,11 +121,17 @@ def claim_instant_win(instant_win_id):
     """Process an instant win prize claim"""
     try:
         data = request.get_json()
+        claim_method = data.get('claim_method', 'credit')
+        value_type = data.get('value_type')  # New: value selection
+        
+        if not value_type:
+            return jsonify({'error': 'Value type selection is required'}), 400
         
         result, error = ClaimService.process_instant_win_claim(
             instant_win_id=instant_win_id,
             user_id=request.current_user.id,
-            claim_method=data.get('claim_method')
+            claim_method=claim_method,
+            value_type=value_type
         )
         
         if error:

@@ -1,223 +1,575 @@
 # src/prize_service/services/prize_service.py
 
-from typing import Optional, Tuple, List, Dict, Any
-from datetime import datetime, timezone, timedelta
+from typing import Optional, Tuple, Dict, Any, List
+from datetime import datetime, timezone
 from sqlalchemy.exc import SQLAlchemyError
-from sqlalchemy import and_, or_
+from sqlalchemy import and_, or_, func
+from decimal import Decimal
+from src.prize_service.services.credit_service import CreditService
 from src.shared import db
 from src.prize_service.models import (
-    Prize, PrizePool, PrizeAllocation, PrizePoolAllocation,
-    PrizeStatus, AllocationType, ClaimStatus
+    Prize, PrizePool, PrizeInstance,
+    PrizeStatus, PoolStatus, InstanceStatus, PrizeType
 )
+import logging
+
+logger = logging.getLogger(__name__)
 
 class PrizeService:
-    @staticmethod
-    def allocate_instant_win(
-        pool_id: int,
-        ticket_id: str,
-        user_id: int
-    ) -> Tuple[Optional[PrizeAllocation], Optional[str]]:
-        """Allocate a prize for an instant win"""
-        try:
-            pool = PrizePool.query.get(pool_id)
-            if not pool or not pool.is_active():
-                return None, "Invalid or inactive prize pool"
-
-            # Get available prizes in pool
-            pool_prizes = PrizePoolAllocation.query.filter(
-                and_(
-                    PrizePoolAllocation.pool_id == pool_id,
-                    PrizePoolAllocation.quantity_remaining > 0
-                )
-            ).all()
-
-            if not pool_prizes:
-                return None, "No prizes available in pool"
-
-            # For now, select first available prize
-            # TODO: Implement prize selection strategy based on rules
-            selected_pool_prize = pool_prizes[0]
-            prize = Prize.query.get(selected_pool_prize.prize_id)
-
-            # Create allocation
-            allocation = PrizeAllocation(
-                prize_id=prize.id,
-                pool_id=pool_id,
-                allocation_type=AllocationType.INSTANT_WIN.value,
-                reference_type='ticket',
-                reference_id=ticket_id,
-                winner_user_id=user_id,
-                won_at=datetime.now(timezone.utc),
-                claim_status=ClaimStatus.PENDING.value,
-                claim_deadline=datetime.now(timezone.utc) + timedelta(days=1)
-            )
-
-            # Update quantities
-            selected_pool_prize.quantity_remaining -= 1
-            prize.available_quantity -= 1
-            prize.total_won += 1
-
-            db.session.add(allocation)
-            db.session.commit()
-
-            return allocation, None
-
-        except SQLAlchemyError as e:
-            db.session.rollback()
-            return None, str(e)
-
-    @staticmethod
-    def allocate_raffle_prize(
-        pool_id: int,
-        raffle_id: str,
-        user_id: int
-    ) -> Tuple[Optional[PrizeAllocation], Optional[str]]:
-        """Allocate a prize for a raffle win"""
-        try:
-            # Similar to instant win allocation but for raffle prizes
-            # Implementation follows same pattern but with raffle-specific logic
-            # TODO: Implement raffle prize allocation logic
-            pass
-
-        except SQLAlchemyError as e:
-            db.session.rollback()
-            return None, str(e)
-
-    @staticmethod
-    def claim_prize(
-        allocation_id: int,
-        user_id: int,
-        claim_method: str
-    ) -> Tuple[Optional[PrizeAllocation], Optional[str]]:
-        """Process a prize claim"""
-        try:
-            allocation = PrizeAllocation.query.get(allocation_id)
-            if not allocation:
-                return None, "Prize allocation not found"
-
-            if allocation.winner_user_id != user_id:
-                return None, "Not authorized to claim this prize"
-
-            if allocation.claim_status != ClaimStatus.PENDING.value:
-                return None, f"Prize cannot be claimed. Status: {allocation.claim_status}"
-
-            if allocation.claim_deadline and allocation.claim_deadline < datetime.now(timezone.utc):
-                allocation.claim_status = ClaimStatus.EXPIRED.value
-                db.session.commit()
-                return None, "Prize claim has expired"
-
-            # Process claim based on method
-            prize = Prize.query.get(allocation.prize_id)
-            if claim_method == 'cash':
-                allocation.value_claimed = prize.cash_value
-            elif claim_method == 'credit':
-                allocation.value_claimed = prize.credit_value
-            else:
-                allocation.value_claimed = prize.retail_value
-
-            allocation.claim_status = ClaimStatus.CLAIMED.value
-            allocation.claimed_at = datetime.now(timezone.utc)
-            allocation.claim_method = claim_method
-
-            prize.total_claimed += 1
-            
-            db.session.commit()
-            return allocation, None
-
-        except SQLAlchemyError as e:
-            db.session.rollback()
-            return None, str(e)
-
-    @staticmethod
-    def get_user_prizes(user_id: int) -> Tuple[Optional[List[PrizeAllocation]], Optional[str]]:
-        """Get all prizes won by a user"""
-        try:
-            allocations = PrizeAllocation.query.filter_by(winner_user_id=user_id).all()
-            return allocations, None
-        except SQLAlchemyError as e:
-            return None, str(e)
-        
     @staticmethod
     def create_prize(data: dict, admin_id: int) -> Tuple[Optional[Prize], Optional[str]]:
         """Create a new prize"""
         try:
+            # Value validations first
+            if Decimal(str(data.get('cash_value', 0))) > Decimal(str(data.get('retail_value', 0))):
+                return None, "cash_value cannot exceed retail_value"
+            
+            if Decimal(str(data.get('credit_value', 0))) <= 0:
+                return None, "credit_value must be positive"
+
+            # Type validation
+            if data.get('type') not in [t.value for t in PrizeType]:
+                valid_types = [t.value for t in PrizeType]
+                return None, f"Invalid prize type. Must be one of: {', '.join(valid_types)}"
+
             prize = Prize(
                 name=data['name'],
                 description=data.get('description'),
                 type=data['type'],
-                custom_type=data.get('custom_type'),
-                tier=data.get('tier', 'silver'),
+                tier=data['tier'],
                 retail_value=data['retail_value'],
                 cash_value=data['cash_value'],
                 credit_value=data['credit_value'],
-                total_quantity=data.get('total_quantity'),
-                available_quantity=data.get('total_quantity'),  # Initially same as total
-                min_threshold=data.get('min_threshold', 0),
-                win_limit_per_user=data.get('win_limit_per_user'),
-                win_limit_period_days=data.get('win_limit_period_days'),
-                status=PrizeStatus.ACTIVE.value,
-                created_by_id=admin_id
+                expiry_days=data.get('expiry_days', 7),
+                created_by_id=admin_id,
+                status=PrizeStatus.ACTIVE.value
             )
 
             db.session.add(prize)
             db.session.commit()
+            
+            logger.info(f"Created new prize {prize.id}: {prize.name}")
             return prize, None
 
         except SQLAlchemyError as e:
             db.session.rollback()
+            logger.error(f"Error creating prize: {str(e)}")
             return None, str(e)
 
     @staticmethod
-    def create_pool(data: dict, admin_id: int) -> Tuple[Optional[PrizePool], Optional[str]]:
+    def update_prize(prize_id: int, data: dict, admin_id: int) -> Tuple[Optional[Prize], Optional[str]]:
+        """Update prize template if not used in any pool"""
+        try:
+            prize = db.session.get(Prize, prize_id)
+            if not prize:
+                return None, "Prize not found"
+
+            # Check if prize is used in any pool
+            if PrizeInstance.query.filter_by(prize_id=prize_id).first():
+                return None, "Cannot update prize that is used in pools"
+
+            # Update allowed fields
+            prize.name = data.get('name', prize.name)
+            prize.retail_value = data.get('retail_value', prize.retail_value)
+            prize.cash_value = data.get('cash_value', prize.cash_value)
+            prize.credit_value = data.get('credit_value', prize.credit_value)
+            
+            # Validate values after update
+            if Decimal(str(prize.cash_value)) > Decimal(str(prize.retail_value)):
+                return None, "cash_value cannot exceed retail_value"
+            
+            if Decimal(str(prize.credit_value)) <= 0:
+                return None, "credit_value must be positive"
+            
+            prize.updated_at = datetime.now(timezone.utc)
+            db.session.commit()
+            
+            return prize, None
+
+        except SQLAlchemyError as e:
+            db.session.rollback()
+            logger.error(f"Error updating prize: {str(e)}")
+            return None, str(e)
+
+    @staticmethod
+    def get_prize(prize_id: int) -> Optional[Prize]:
+        """Get prize by ID"""
+        return db.session.get(Prize, prize_id)
+
+    @staticmethod
+    def list_prizes() -> List[Prize]:
+        """Get all prizes"""
+        return db.session.query(Prize).all()
+
+    @staticmethod
+    def create_pool(data: dict, admin_id: int) -> Tuple[Optional[Dict], Optional[str]]:
         """Create a new prize pool"""
         try:
             pool = PrizePool(
                 name=data['name'],
                 description=data.get('description'),
-                start_date=data['start_date'],
-                end_date=data['end_date'],
-                budget_limit=data.get('budget_limit'),
-                allocation_rules=data.get('allocation_rules'),
-                win_limits=data.get('win_limits'),
-                eligibility_rules=data.get('eligibility_rules'),
-                created_by_id=admin_id
+                created_by_id=admin_id,
+                status=PoolStatus.UNLOCKED.value
             )
 
             db.session.add(pool)
             db.session.commit()
-            return pool, None
+            
+            # Return the formatted response directly as a dict
+            response = {
+                'pool_id': pool.id,
+                'name': pool.name,
+                'description': pool.description,
+                'total_instances': 0,
+                'values': {
+                    'retail_total': 0,
+                    'cash_total': 0,
+                    'credit_total': 0
+                },
+                'status': pool.status
+            }
+            
+            logger.info(f"Created new pool {pool.id}: {pool.name}")
+            return response, None
 
         except SQLAlchemyError as e:
             db.session.rollback()
+            logger.error(f"Error creating pool: {str(e)}")
             return None, str(e)
 
     @staticmethod
-    def create_pool_allocation(pool_id: int, data: dict, admin_id: int) -> Tuple[Optional[PrizePoolAllocation], Optional[str]]:
-        """Create a new prize pool allocation"""
+    def allocate_to_pool(pool_id: int, prize_id: int, quantity: int, collective_odds: float, admin_id: int) -> Tuple[Optional[Dict], Optional[str]]:
+        """Allocate prizes to pool"""
         try:
-            # Verify pool exists
-            pool = PrizePool.query.get(pool_id)
+            pool = db.session.get(PrizePool, pool_id)
             if not pool:
-                return None, "Prize pool not found"
+                return None, "Pool not found"
 
-            # Verify prize exists
-            prize = Prize.query.get(data['prize_id'])
+            if pool.status != PoolStatus.UNLOCKED.value:
+                return None, "Can only allocate to UNLOCKED pools"
+
+            prize = db.session.get(Prize, prize_id)
             if not prize:
                 return None, "Prize not found"
 
-            # Create allocation
-            allocation = PrizePoolAllocation(
-                pool_id=pool_id,
-                prize_id=data['prize_id'],
-                quantity_allocated=data['quantity'],
-                quantity_remaining=data['quantity'],
-                allocation_rules=data.get('allocation_rules')
-            )
+            # Calculate individual odds for each instance
+            individual_odds = collective_odds / quantity
 
-            db.session.add(allocation)
+            # Find the last used sequence number for this pool-prize combination
+            last_instance = db.session.query(PrizeInstance)\
+                .filter(
+                    PrizeInstance.pool_id == pool_id,
+                    PrizeInstance.prize_id == prize_id
+                )\
+                .order_by(PrizeInstance.instance_id.desc())\
+                .first()
+
+            # Determine the starting sequence number
+            start_seq = 1
+            if last_instance:
+                # Extract the last sequence number and increment
+                last_seq = int(last_instance.instance_id.split('-')[2])
+                start_seq = last_seq + 1
+
+            # Create instances
+            instances = []
+            for i in range(quantity):
+                # Generate sequence numbers continuing from the last used one
+                seq_num = str(start_seq + i).zfill(3)
+                instance_id = f"{pool_id}-{prize_id}-{seq_num}"
+                
+                instance = PrizeInstance(
+                    instance_id=instance_id,
+                    pool_id=pool_id,
+                    prize_id=prize_id,
+                    individual_odds=individual_odds,
+                    status=InstanceStatus.AVAILABLE.value,
+                    retail_value=prize.retail_value,
+                    cash_value=prize.cash_value,
+                    credit_value=prize.credit_value,
+                    created_by_id=admin_id
+                )
+                db.session.add(instance)
+                instances.append(instance)
+
+            # Update pool counts
+            pool.total_instances += quantity
+            pool.available_instances += quantity
+            if prize.type == 'Draw_Win':
+                pool.draw_win_count += quantity
+            else:
+                pool.instant_win_count += quantity
+
+            # Update pool value totals
+            pool.retail_total += prize.retail_value * quantity
+            pool.cash_total += prize.cash_value * quantity
+            pool.credit_total += prize.credit_value * quantity
+
+            # Commit all changes
             db.session.commit()
-            return allocation, None
+                
+            # Return successful allocation result
+            return {
+                'allocated_instances': [inst.to_dict() for inst in instances],
+                'pool_updated_totals': pool.to_dict()
+            }, None
 
         except SQLAlchemyError as e:
             db.session.rollback()
+            logger.error(f"Error allocating prizes: {str(e)}")
+            return None, str(e)
+
+    @staticmethod
+    def claim_prize(
+        instance_id: int, 
+        user_id: int,
+        claim_method: str = 'credit'
+    ) -> Tuple[Optional[Dict], Optional[str]]:
+        """Process a prize claim with attempt tracking"""
+        try:
+            instance = PrizeInstance.query.get(instance_id)
+            if not instance:
+                return None, "Prize instance not found"
+
+            if not instance.can_be_claimed():
+                return None, "Prize cannot be claimed"
+
+            # Increment claim attempt
+            if not instance.increment_claim_attempt():
+                return None, "Maximum claim attempts exceeded"
+
+            # Process claim based on method
+            if claim_method == 'credit':
+                success = CreditService.process_prize_claim(
+                    instance_id=instance_id,
+                    user_id=user_id,
+                    amount=float(instance.credit_value)
+                )
+                
+                if not success:
+                    return None, "Credit processing failed"
+
+            # Update instance on successful claim
+            instance.status = InstanceStatus.CLAIMED.value
+            instance.claimed_by_id = user_id
+            instance.claimed_at = datetime.now(timezone.utc)
+            
+            db.session.commit()
+            
+            return instance.to_dict(), None
+
+        except SQLAlchemyError as e:
+            db.session.rollback()
+            logger.error(f"Error processing claim: {str(e)}")
+            return None, str(e)
+
+    @staticmethod
+    def get_user_prizes(user_id: int) -> Tuple[Optional[List[Dict]], Optional[str]]:
+        """Get all prizes claimed by a user"""
+        try:
+            instances = PrizeInstance.query.filter_by(
+                claimed_by_id=user_id,
+                status=InstanceStatus.CLAIMED.value
+            ).all()
+            
+            return [inst.to_dict() for inst in instances], None
+            
+        except SQLAlchemyError as e:
+            logger.error(f"Error retrieving user prizes: {str(e)}")
+            return None, str(e)
+
+    @staticmethod
+    def process_expired_claims() -> Tuple[int, Optional[str]]:
+        """Process expired claims and reset instances"""
+        try:
+            current_time = datetime.now(timezone.utc)
+            expired_count = 0
+
+            # Find expired but unclaimed instances
+            expired_instances = PrizeInstance.query.filter(
+                and_(
+                    PrizeInstance.status == InstanceStatus.DISCOVERED.value,
+                    PrizeInstance.claim_deadline < current_time
+                )
+            ).all()
+
+            for instance in expired_instances:
+                instance.status = InstanceStatus.AVAILABLE.value
+                instance.claim_attempts = 0
+                expired_count += 1
+                logger.info(f"Reset expired instance {instance.instance_id}")
+
+            db.session.commit()
+            
+            if expired_count > 0:
+                logger.info(f"Processed {expired_count} expired claims")
+                
+            return expired_count, None
+
+        except SQLAlchemyError as e:
+            db.session.rollback()
+            logger.error(f"Error processing expired claims: {str(e)}")
+            return 0, str(e)
+
+    @staticmethod
+    def get_prize_values(instance_id: int) -> Tuple[Optional[Dict[str, float]], Optional[str]]:
+        """Get available value options for prize instance"""
+        try:
+            instance = PrizeInstance.query.get(instance_id)
+            if not instance:
+                return None, "Prize instance not found"
+
+            return {
+                'retail_value': float(instance.retail_value),
+                'cash_value': float(instance.cash_value),
+                'credit_value': float(instance.credit_value)
+            }, None
+
+        except SQLAlchemyError as e:
+            logger.error(f"Error getting prize values: {str(e)}")
+            return None, str(e)
+
+    @staticmethod
+    def validate_prize_selection(prize_id: int, selected_value: str) -> Tuple[bool, Optional[str]]:
+        """Validate selected prize value option"""
+        try:
+            prize = Prize.query.get(prize_id)
+            if not prize:
+                return False, "Prize not found"
+
+            valid_values = {
+                'retail': float(prize.retail_value),
+                'cash': float(prize.cash_value),
+                'credit': float(prize.credit_value)
+            }
+
+            if selected_value not in valid_values:
+                return False, "Invalid value selection"
+
+            return True, None
+
+        except SQLAlchemyError as e:
+            logger.error(f"Error validating prize selection: {str(e)}")
+            return False, str(e)
+
+    # Pool management methods
+    @staticmethod
+    def lock_pool(pool_id: int, admin_id: int) -> Tuple[Optional[Dict], Optional[str]]:
+        """Lock prize pool with validation"""
+        try:
+            pool = db.session.get(PrizePool, pool_id)
+            if not pool:
+                return None, "Pool not found"
+
+            if pool.status != PoolStatus.UNLOCKED.value:
+                return None, "Can only lock UNLOCKED pools"
+
+            # Run validations
+            is_valid, error = pool.validate_for_lock()
+            if not is_valid:
+                return None, error
+
+            # Lock pool
+            pool.status = PoolStatus.LOCKED.value
+            pool.updated_at = datetime.now(timezone.utc)
+            db.session.commit()
+            
+            logger.info(f"Successfully locked pool {pool_id}")
+            return pool.to_dict(), None
+
+        except SQLAlchemyError as e:
+            db.session.rollback()
+            logger.error(f"Error locking pool: {str(e)}")
+            return None, str(e)
+
+    @staticmethod
+    def unlock_pool(pool_id: int, admin_id: int) -> Tuple[Optional[Dict], Optional[str]]:
+        """Unlock a locked pool if conditions allow"""
+        try:
+            pool = db.session.get(PrizePool, pool_id)
+            if not pool:
+                return None, "Pool not found"
+
+            if pool.status != PoolStatus.LOCKED.value:
+                return None, "Can only unlock LOCKED pools"
+
+            if not pool.check_can_unlock():
+                return None, "Cannot unlock pool - in use by active raffle"
+
+            pool.status = PoolStatus.UNLOCKED.value
+            pool.updated_at = datetime.now(timezone.utc)
+            db.session.commit()
+            
+            logger.info(f"Successfully unlocked pool {pool_id}")
+            return pool.to_dict(), None
+
+        except SQLAlchemyError as e:
+            db.session.rollback()
+            logger.error(f"Error unlocking pool: {str(e)}")
+            return None, str(e)
+
+    @staticmethod
+    def get_pool_stats(pool_id: int) -> Tuple[Optional[Dict], Optional[str]]:
+        """Get comprehensive pool statistics"""
+        try:
+            pool = db.session.get(PrizePool, pool_id)
+            if not pool:
+                return None, "Pool not found"
+
+            stats = {
+                'total_instances': pool.total_instances,
+                'by_type': {
+                    'instant_win': {
+                        'total': pool.instant_win_count,
+                        'available': PrizeInstance.query.filter_by(
+                            pool_id=pool_id,
+                            status=InstanceStatus.AVAILABLE.value
+                        ).count(),
+                        'discovered': PrizeInstance.query.filter_by(
+                            pool_id=pool_id,
+                            status=InstanceStatus.DISCOVERED.value
+                        ).count(),
+                        'claimed': PrizeInstance.query.filter_by(
+                            pool_id=pool_id,
+                            status=InstanceStatus.CLAIMED.value
+                        ).count()
+                    },
+                    'draw_win': {
+                        'total': pool.draw_win_count,
+                        'available': pool.draw_win_count - PrizeInstance.query.filter_by(
+                            pool_id=pool_id,
+                            status=InstanceStatus.CLAIMED.value
+                        ).count()
+                    }
+                },
+                'values': {
+                    'retail_total': float(pool.retail_total),
+                    'cash_total': float(pool.cash_total),
+                    'credit_total': float(pool.credit_total),
+                    'claimed': {
+                        'retail': float(sum(inst.retail_value for inst in pool.instances.filter_by(
+                            status=InstanceStatus.CLAIMED.value
+                        ))),
+                        'cash': float(sum(inst.cash_value for inst in pool.instances.filter_by(
+                            status=InstanceStatus.CLAIMED.value
+                        ))),
+                        'credit': float(sum(inst.credit_value for inst in pool.instances.filter_by(
+                            status=InstanceStatus.CLAIMED.value
+                        )))
+                    }
+                }
+            }
+            
+            return stats, None
+
+        except SQLAlchemyError as e:
+            logger.error(f"Error getting pool stats: {str(e)}")
+            return None, str(e)
+
+    @staticmethod
+    def mark_pool_used(pool_id: int, raffle_id: int) -> Tuple[Optional[Dict], Optional[str]]:
+        """Mark pool as USED when raffle becomes active"""
+        try:
+            pool = db.session.get(PrizePool, pool_id)
+            if not pool:
+                return None, "Pool not found"
+
+            if pool.status != PoolStatus.LOCKED.value:
+                return None, "Can only mark LOCKED pools as USED"
+
+            if pool.raffle_id != raffle_id:
+                return None, "Pool not assigned to this raffle"
+
+            pool.status = PoolStatus.USED.value
+            pool.updated_at = datetime.now(timezone.utc)
+            db.session.commit()
+            
+            logger.info(f"Marked pool {pool_id} as USED by raffle {raffle_id}")
+            return pool.to_dict(), None
+
+        except SQLAlchemyError as e:
+            db.session.rollback()
+            logger.error(f"Error marking pool as used: {str(e)}")
+            return None, str(e)
+
+    @staticmethod
+    def get_pool_claim_stats(pool_id: int) -> Tuple[Optional[Dict], Optional[str]]:
+        """Get detailed claim statistics for a pool"""
+        try:
+            pool = db.session.get(PrizePool, pool_id)
+            if not pool:
+                return None, "Pool not found"
+
+            stats = {
+                'total_instances': pool.total_instances,
+                'by_type': {
+                    'Instant_Win': {
+                        'count': pool.instant_win_count,
+                        'allocated': PrizeInstance.query.filter_by(
+                            pool_id=pool_id,
+                            status=InstanceStatus.AVAILABLE.value
+                        ).count(),
+                        'discovered': PrizeInstance.query.filter_by(
+                            pool_id=pool_id,
+                            status=InstanceStatus.DISCOVERED.value
+                        ).count(),
+                        'claimed': PrizeInstance.query.filter_by(
+                            pool_id=pool_id,
+                            status=InstanceStatus.CLAIMED.value
+                        ).count(),
+                        'forfeited': 0  # For future use
+                    },
+                    'Draw_Win': {
+                        'count': pool.draw_win_count,
+                        'allocated': 0,
+                        'claimed': PrizeInstance.query.filter_by(
+                            pool_id=pool_id,
+                            status=InstanceStatus.CLAIMED.value
+                        ).count(),
+                        'forfeited': 0
+                    }
+                },
+                'values_claimed': {
+                    'retail_total': float(sum(inst.retail_value for inst in pool.instances.filter_by(
+                        status=InstanceStatus.CLAIMED.value
+                    ))),
+                    'cash_total': float(sum(inst.cash_value for inst in pool.instances.filter_by(
+                        status=InstanceStatus.CLAIMED.value
+                    ))),
+                    'credit_total': float(sum(inst.credit_value for inst in pool.instances.filter_by(
+                        status=InstanceStatus.CLAIMED.value
+                    )))
+                }
+            }
+
+            return stats, None
+
+        except Exception as e:
+            logger.error(f"Error getting pool stats: {str(e)}")
+            return None, str(e)
+
+    @staticmethod
+    def assign_pool_to_raffle(pool_id: int, raffle_id: int, admin_id: int) -> Tuple[Optional[Dict], Optional[str]]:
+        """Assign a pool to a raffle"""
+        try:
+            pool = db.session.get(PrizePool, pool_id)
+            if not pool:
+                return None, "Pool not found"
+
+            if pool.status != PoolStatus.LOCKED.value:
+                return None, "Can only assign LOCKED pools"
+
+            if pool.raffle_id:
+                return None, "Pool already assigned to a raffle"
+
+            pool.raffle_id = raffle_id
+            pool.updated_at = datetime.now(timezone.utc)
+            db.session.commit()
+            
+            logger.info(f"Assigned pool {pool_id} to raffle {raffle_id}")
+            return pool.to_dict(), None
+
+        except SQLAlchemyError as e:
+            db.session.rollback()
+            logger.error(f"Error assigning pool to raffle: {str(e)}")
             return None, str(e)

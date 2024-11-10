@@ -1,99 +1,83 @@
 # scripts/migrate_db.py
-from pathlib import Path
-import sys
-import argparse
 import os
+import sys
+from pathlib import Path
+import shutil
+
+# Fix path properly
+current_dir = Path(__file__).resolve().parent
+project_root = current_dir.parent
+os.chdir(project_root)
+sys.path.append(str(project_root))
+
 import logging
-
-# Configure logging
-logging.basicConfig(
-    level=logging.INFO,
-    format='%(asctime)s - %(levelname)s - %(message)s',
-    handlers=[
-        logging.StreamHandler(),
-        logging.FileHandler('migration.log')
-    ]
-)
-
-# Add project root to Python path
-project_root = Path(__file__).parent.parent
-sys.path.insert(0, str(project_root))
-
 from flask import Flask
-from src.shared import db, migrate
+from flask_migrate import Migrate
+import sqlalchemy as sa
+
+from src.shared import db
 from src.shared.config import config
 
-# Import all models that need migration
-from src.prize_service.models import Prize, PrizePool, PrizeAllocation
-from src.raffle_service.models import Ticket, Raffle
-from src.user_service.models import User
+logging.basicConfig(level=logging.INFO)
+logger = logging.getLogger(__name__)
 
-def init_migrations(app):
-    """Initialize migrations directory if it doesn't exist"""
-    migrations_dir = Path(project_root) / 'migrations'
+def create_app():
+    app = Flask(__name__)
+    db_path = project_root / 'data' / 'wildrandom.db'
+    db_path.parent.mkdir(exist_ok=True)
     
-    if not migrations_dir.exists():
-        logging.info("Initializing migrations directory...")
+    app.config.update(
+        SQLALCHEMY_DATABASE_URI=f'sqlite:///{db_path}',
+        SQLALCHEMY_TRACK_MODIFICATIONS=False,
+    )
+    
+    db.init_app(app)
+    return app
+
+def reset_migration_state():
+    """Reset migration state while preserving database"""
+    # Remove migrations directory
+    migrations_dir = project_root / 'migrations'
+    if migrations_dir.exists():
+        logger.info("Removing existing migrations directory...")
+        shutil.rmtree(migrations_dir)
+    
+    # Clean alembic_version table
+    app = create_app()
+    with app.app_context():
         try:
-            from flask_migrate import init as init_migrations
-            with app.app_context():
-                init_migrations('migrations')
-            logging.info("Migrations directory initialized successfully.")
+            db.session.execute(sa.text('DROP TABLE IF EXISTS alembic_version;'))
+            db.session.commit()
+            logger.info("Reset migration state successfully")
         except Exception as e:
-            logging.error(f"Error initializing migrations: {e}")
+            db.session.rollback()
+            logger.error(f"Error resetting state: {e}")
             raise
 
-def create_migration(app):
-    """Generate new migration script"""
-    logging.info("Generating new migration...")
-    try:
-        from flask_migrate import migrate
+def init_migrations():
+    """Initialize fresh migration state"""
+    app = create_app()
+    migrate = Migrate(app, db)
+    
+    with app.app_context():
+        # Import all models
+        from src.prize_service.models import Prize
+        from src.user_service.models import User
+        from src.raffle_service.models import Raffle
         
-        with app.app_context():
-            migrate(directory='migrations', message='Add prize pool and ticket enhancements')
-        logging.info("Migration script generated successfully.")
-    except Exception as e:
-        logging.error(f"Error generating migration: {e}")
-        raise
-
-def apply_migration(app):
-    """Apply pending migrations"""
-    logging.info("Applying migrations...")
-    try:
-        from flask_migrate import upgrade
-        
-        with app.app_context():
-            upgrade(directory='migrations')
-        logging.info("Migrations applied successfully.")
-    except Exception as e:
-        logging.error(f"Error applying migrations: {e}")
-        raise
-
-def main():
-    parser = argparse.ArgumentParser(description='Database migration management')
-    parser.add_argument('action', choices=['init', 'generate', 'apply'],
-                       help='Action to perform: initialize migrations, generate new migration, or apply migrations')
-    
-    args = parser.parse_args()
-    
-    # Create Flask app
-    app = Flask(__name__)
-    app.config.from_object(config['development'])
-    
-    # Initialize extensions
-    db.init_app(app)
-    migrate.init_app(app, db)
-    
-    try:
-        if args.action == 'init':
-            init_migrations(app)
-        elif args.action == 'generate':
-            create_migration(app)
-        elif args.action == 'apply':
-            apply_migration(app)
-    except Exception as e:
-        logging.error(f"Migration failed: {e}")
-        sys.exit(1)
+        migrate.init_app(app, db)
+        logger.info("Migrations initialized")
 
 if __name__ == "__main__":
-    main()
+    try:
+        logger.info("Starting migration reset process...")
+        reset_migration_state()
+        
+        logger.info("Initializing new migration...")
+        init_migrations()
+        
+        logger.info("Migration setup complete! Now you can run: flask db migrate")
+        
+    except Exception as e:
+        logger.error(f"Error during migration setup: {e}")
+        raise

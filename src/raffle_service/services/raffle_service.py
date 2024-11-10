@@ -1,6 +1,6 @@
 # src/raffle_service/services/raffle_service.py
 from typing import Optional, Tuple, List, Dict, Any
-from datetime import datetime, timezone
+from datetime import datetime, timezone, timedelta
 from sqlalchemy.exc import SQLAlchemyError
 from sqlalchemy import and_, or_, func
 import logging
@@ -56,6 +56,7 @@ class RaffleService:
                 ticket_number = str(i + 1).zfill(3)
                 ticket = Ticket(
                     raffle_id=raffle_id,
+                    ticket_id=f"{raffle_id}-{ticket_number}",
                     ticket_number=ticket_number,
                     status=TicketStatus.AVAILABLE.value,
                     instant_win=False,
@@ -64,7 +65,7 @@ class RaffleService:
                 tickets.append(ticket)
             
             db.session.bulk_save_objects(tickets)
-            db.session.commit()
+            db.session.flush()
 
             if instant_win_count > 0 and prize_pool_id:
                 # Verify prize pool
@@ -72,7 +73,7 @@ class RaffleService:
                 if not pool or pool.status != PoolStatus.LOCKED.value:
                     return False
                 
-                # Mark random tickets as instant win eligible
+                # Select random tickets for instant win eligibility
                 eligible_tickets = Ticket.query.filter_by(
                     raffle_id=raffle_id,
                     status=TicketStatus.AVAILABLE.value
@@ -82,97 +83,92 @@ class RaffleService:
                     ticket.instant_win_eligible = True
                     ticket.instant_win = True
 
-                db.session.commit()
-
+            db.session.commit()
             return True
+
         except SQLAlchemyError:
             db.session.rollback()
             return False
 
     @staticmethod
-    def create_raffle(data: dict, admin_id: int) -> Tuple[Optional[Raffle], Optional[str]]:
-        """Create a new raffle"""
+    def create_raffle(data: dict, admin_id: int) -> Tuple[Optional[Dict], Optional[str]]:
+        """Create a new raffle with prize pool integration"""
         try:
-            # Ensure timezone awareness for start and end times
-            start_time = data['start_time']
-            end_time = data['end_time']
-            
-            # Handle string inputs
-            if isinstance(start_time, str):
-                start_time = datetime.fromisoformat(start_time.replace('Z', '+00:00'))
-            elif start_time.tzinfo is None:
-                start_time = start_time.replace(tzinfo=timezone.utc)
-                
-            if isinstance(end_time, str):
-                end_time = datetime.fromisoformat(end_time.replace('Z', '+00:00'))
-            elif end_time.tzinfo is None:
-                end_time = end_time.replace(tzinfo=timezone.utc)
+            # Validate prize pool
+            prize_pool = PrizePool.query.get(data['prize_pool_id'])
+            if not prize_pool:
+                return None, "Prize pool not found"
+            if prize_pool.status != PoolStatus.LOCKED.value:
+                return None, "Prize pool must be locked"
 
-            if start_time >= end_time:
-                return None, "End time must be after start time"
+            # Validate draw configuration
+            draw_config = data['draw_configuration']
+            if draw_config['number_of_draws'] < 1:
+                return None, "Number of draws must be at least 1"
+            if draw_config['distribution_type'] not in ['single', 'split']:
+                return None, "Invalid distribution type"
 
-            # Validate prize pool if specified
-            prize_pool_id = data.get('prize_pool_id')
-            if prize_pool_id:
-                pool = PrizePool.query.get(prize_pool_id)
-                if not pool:
-                    return None, "Prize pool not found"
-                if pool.status != PoolStatus.LOCKED.value:
-                    return None, "Prize pool must be locked before use"
-
-            # Validate instant win configuration
-            instant_win_count = data.get('instant_win_count', 0)
-            total_prize_count = data.get('total_prize_count', 1)
-            if instant_win_count > total_prize_count:
-                return None, "Instant win count cannot exceed total prize count"
-
+            # Create raffle
             raffle = Raffle(
                 title=data['title'],
                 description=data.get('description'),
                 total_tickets=data['total_tickets'],
                 ticket_price=data['ticket_price'],
-                start_time=start_time,
-                end_time=end_time,
+                start_time=data['start_time'],
+                end_time=data['end_time'],
                 status=RaffleStatus.DRAFT.value,
-                created_by_id=admin_id,
-                instant_win_count=instant_win_count,
-                total_prize_count=total_prize_count,
-                max_tickets_per_user=data.get('max_tickets_per_user', 10)
+                max_tickets_per_user=data['max_tickets_per_user'],
+                prize_pool_id=prize_pool.id,
+                draw_count=draw_config['number_of_draws'],
+                draw_distribution_type=draw_config['distribution_type'],
+                created_by_id=admin_id
             )
             
             db.session.add(raffle)
-            db.session.commit()
+            db.session.flush()  # Get raffle ID
+
+            # Generate tickets
+            tickets_created = RaffleService._generate_tickets(
+                raffle_id=raffle.id,
+                total_tickets=raffle.total_tickets,
+                instant_win_count=prize_pool.instant_win_count,
+                prize_pool_id=prize_pool.id
+            )
             
-            # Generate tickets with instant win configuration
-            if not RaffleService._generate_tickets(
-                raffle.id,
-                raffle.total_tickets,
-                instant_win_count,
-                prize_pool_id
-            ):
-                db.session.delete(raffle)
-                db.session.commit()
+            if not tickets_created:
+                db.session.rollback()
                 return None, "Failed to generate tickets"
 
-            # Handle instant win allocation if configured
-            if instant_win_count > 0 and prize_pool_id:
-                instant_wins, error = InstantWinService.allocate_instant_wins(
-                    raffle_id=raffle.id,
-                    count=instant_win_count
-                )
-                
-                if error:
-                    db.session.delete(raffle)
-                    db.session.commit()
-                    return None, f"Failed to allocate instant wins: {error}"
-                
-                # Log instant win allocation
-                logging.info(f"Created {len(instant_wins)} instant wins for raffle {raffle.id}")
-            
-            return raffle, None
-            
+            db.session.commit()
+
+            # Prepare response according to API spec
+            response = raffle.to_dict()
+            response.update({
+                'tickets': {
+                    'total_generated': raffle.total_tickets,
+                    'instant_win_eligible': prize_pool.instant_win_count
+                },
+                'draw_configuration': {
+                    'number_of_draws': raffle.draw_count,
+                    'distribution_type': raffle.draw_distribution_type,
+                    'prize_value_per_draw': float(prize_pool.credit_total / raffle.draw_count) if raffle.draw_distribution_type == 'split' else float(prize_pool.credit_total),
+                    'draw_time': raffle.end_time.isoformat()
+                },
+                'claim_deadlines': {
+                    'instant_win': (raffle.end_time + timedelta(hours=2)).isoformat(),
+                    'draw_win': (raffle.end_time + timedelta(days=14)).isoformat()
+                }
+            })
+
+            return response, None
+
         except SQLAlchemyError as e:
             db.session.rollback()
+            logging.error(f"Database error in create_raffle: {str(e)}")
+            return None, str(e)
+        except Exception as e:
+            db.session.rollback()
+            logging.error(f"Error in create_raffle: {str(e)}")
             return None, str(e)
 
     @staticmethod
@@ -285,8 +281,8 @@ class RaffleService:
         return new_status in VALID_STATUS_TRANSITIONS.get(current_status, [])
 
     @staticmethod
-    def purchase_tickets(raffle_id: int, user_id: int, quantity: int, transaction_id: int) -> Tuple[Optional[List[Ticket]], Optional[str]]:
-        """Purchase tickets for a raffle"""
+    def purchase_tickets(raffle_id: int, user_id: int, quantity: int, transaction_id: int) -> Tuple[Optional[Dict], Optional[str]]:
+        """Purchase tickets with instant win integration"""
         try:
             raffle, error = RaffleService.get_raffle(raffle_id)
             if error:
@@ -295,12 +291,36 @@ class RaffleService:
             if not raffle.can_purchase_tickets():
                 return None, f"Cannot purchase tickets for raffle in {raffle.status} status"
 
-            return TicketService.purchase_tickets(
+            # Purchase tickets through ticket service
+            tickets, error = TicketService.purchase_tickets(
                 user_id=user_id,
                 raffle_id=raffle_id,
                 quantity=quantity,
                 transaction_id=transaction_id
             )
+            
+            if error:
+                return None, error
+
+            # Format response according to API spec
+            response = {
+                'tickets': [
+                    {
+                        'ticket_id': ticket.ticket_id,
+                        'ticket_number': ticket.ticket_number,
+                        'purchase_time': ticket.purchase_time.isoformat(),
+                        'status': ticket.status,
+                        'transaction_id': str(transaction_id)
+                    } for ticket in tickets
+                ],
+                'transaction': {
+                    'amount': raffle.ticket_price * quantity,
+                    'transaction_id': str(transaction_id)
+                }
+            }
+
+            return response, None
+
         except Exception as e:
             return None, str(e)
 

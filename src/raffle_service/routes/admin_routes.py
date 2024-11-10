@@ -6,12 +6,16 @@ from src.raffle_service.services.raffle_service import RaffleService
 from src.raffle_service.services.ticket_service import TicketService
 from src.raffle_service.services.instant_win_service import InstantWinService
 from src.raffle_service.services.draw_service import DrawService
+from src.raffle_service.schemas.raffle_schema import RaffleCreateSchema
+from marshmallow import ValidationError
 from src.raffle_service.models.raffle import RaffleStatus
 from src.raffle_service.models.ticket import Ticket
 from src.raffle_service.models import InstantWin
 from src.user_service.models.user import User
+from src.raffle_service.services.ticket_service import TicketService
+from src.raffle_service.services.purchase_limit_service import PurchaseLimitService
 
-admin_bp = Blueprint('raffle_admin', __name__, url_prefix='/api/admin/raffles')
+raffle_admin_bp = Blueprint('raffle_admin', __name__, url_prefix='/api/admin/raffles')
 logger = logging.getLogger(__name__)
 if not logger.handlers:
     handler = logging.StreamHandler()
@@ -21,27 +25,35 @@ if not logger.handlers:
     logger.addHandler(handler)
     logger.setLevel(logging.INFO)
 
-@admin_bp.route('/raffles', methods=['POST'])
+@raffle_admin_bp.route('/raffles/create', methods=['POST'])
 @admin_required
 def create_raffle():
     """Create a new raffle"""
     try:
-        data = request.get_json()
+        # Validate input using schema
+        schema = RaffleCreateSchema()
+        data = schema.load(request.get_json())
+        
         raffle, error = RaffleService.create_raffle(
             data=data,
             admin_id=request.current_user.id
         )
         
         if error:
+            logger.error(f"Error creating raffle: {error}")
             return jsonify({'error': error}), 400
             
-        return jsonify(raffle.to_dict()), 201
+        # Response is already formatted according to API spec by the service
+        return jsonify(raffle), 201
         
+    except ValidationError as e:
+        logger.error(f"Validation error: {str(e.messages)}")
+        return jsonify({'error': e.messages}), 400
     except Exception as e:
-        logging.error(f"Error creating raffle: {str(e)}")
+        logger.error(f"Unexpected error creating raffle: {str(e)}")
         return jsonify({'error': str(e)}), 500
 
-@admin_bp.route('/raffles/<int:raffle_id>/status', methods=['PUT'])
+@raffle_admin_bp.route('/raffles/<int:raffle_id>/status', methods=['PUT'])
 @admin_required
 def update_raffle_status(raffle_id):
     """Update raffle status"""
@@ -78,7 +90,7 @@ def update_raffle_status(raffle_id):
         logger.error(f"Unexpected error in update_raffle_status: {str(e)}")
         return jsonify({'error': f"Server error: {str(e)}"}), 500
 
-@admin_bp.route('/raffles/<int:raffle_id>/draw', methods=['POST'])
+@raffle_admin_bp.route('/raffles/<int:raffle_id>/draw', methods=['POST'])
 @admin_required
 def execute_draw(raffle_id):
     """Execute prize draw"""
@@ -107,86 +119,7 @@ def execute_draw(raffle_id):
     except Exception as e:
         return jsonify({'error': str(e)}), 500
 
-@admin_bp.route('/tickets/<int:ticket_id>/void', methods=['POST'])
-@admin_required
-def void_ticket(ticket_id):
-    """Void a ticket"""
-    try:
-        data = request.get_json()
-        reason = data.get('reason', 'Administrative action')
-        
-        ticket, error = TicketService.void_ticket(
-            ticket_id=ticket_id,
-            admin_id=request.current_user.id,
-            reason=reason
-        )
-        
-        if error:
-            return jsonify({'error': error}), 400
-            
-        return jsonify(ticket.to_dict())
-        
-    except Exception as e:
-        return jsonify({'error': str(e)}), 500
-
-@admin_bp.route('/raffles/<int:raffle_id>/instant-wins', methods=['POST'])
-@admin_required
-def assign_instant_wins(raffle_id):
-    """Assign instant win tickets"""
-    try:
-        data = request.get_json()
-        count = data.get('count', 0)
-        
-        if count <= 0:
-            return jsonify({'error': 'Count must be greater than 0'}), 400
-            
-        instant_wins, error = InstantWinService.allocate_instant_wins(
-            raffle_id=raffle_id,
-            count=count
-        )
-        
-        if error:
-            return jsonify({'error': error}), 400
-            
-        return jsonify([win.to_dict() for win in instant_wins]), 201
-        
-    except Exception as e:
-        return jsonify({'error': str(e)}), 500
-
-@admin_bp.route('/raffles/<int:raffle_id>/instant-wins', methods=['GET'])
-@admin_required
-def get_instant_wins(raffle_id):
-    """Get all instant wins for a raffle"""
-    try:
-        instant_wins = InstantWin.query.filter_by(raffle_id=raffle_id).all()
-        return jsonify([win.to_dict() for win in instant_wins])
-        
-    except Exception as e:
-        return jsonify({'error': str(e)}), 500
-    
-@admin_bp.route('/raffles/<int:raffle_id>', methods=['PUT'])
-@admin_required
-def update_raffle(raffle_id):
-    """Update raffle details"""
-    try:
-        data = request.get_json()
-        
-        # We'll let the service handle datetime conversion
-        raffle, error = RaffleService.update_raffle(
-            raffle_id=raffle_id,
-            data=data,
-            admin_id=request.current_user.id
-        )
-        
-        if error:
-            return jsonify({'error': error}), 400
-            
-        return jsonify(raffle.to_dict())
-        
-    except Exception as e:
-        return jsonify({'error': str(e)}), 500
-    
-@admin_bp.route('/raffles/<int:raffle_id>/tickets', methods=['GET'])
+@raffle_admin_bp.route('/raffles/<int:raffle_id>/tickets', methods=['GET'])
 @admin_required
 def get_raffle_tickets(raffle_id):
     """Get all tickets for a raffle with detailed information"""
@@ -221,31 +154,76 @@ def get_raffle_tickets(raffle_id):
         })
         
     except Exception as e:
+        logger.error(f"Error getting raffle tickets: {str(e)}")
         return jsonify({'error': str(e)}), 500
-    
-@admin_bp.route('/raffles/<int:raffle_id>/configure-prizes', methods=['PUT'])
+
+@raffle_admin_bp.route('/tickets/<int:ticket_id>/void', methods=['POST'])
 @admin_required
-def configure_raffle_prizes(raffle_id):
-    """Configure prizes for a raffle"""
+def void_ticket(ticket_id):
+    """Void a ticket"""
     try:
         data = request.get_json()
-        if not data:
-            return jsonify({'error': "Prize configuration is required"}), 400
+        reason = data.get('reason', 'Administrative action')
+        
+        ticket, error = TicketService.void_ticket(
+            ticket_id=ticket_id,
+            admin_id=request.current_user.id,
+            reason=reason
+        )
+        
+        if error:
+            return jsonify({'error': error}), 400
             
-        # Validate required fields
-        required_fields = ['pool_id', 'instant_win_count', 'draw_prize_count']
-        if not all(field in data for field in required_fields):
-            return jsonify({
-                'error': f"Missing required fields: {', '.join(required_fields)}"
-            }), 400
+        return jsonify(ticket.to_dict())
+        
+    except Exception as e:
+        return jsonify({'error': str(e)}), 500
+
+@raffle_admin_bp.route('/raffles/<int:raffle_id>/instant-wins', methods=['POST'])
+@admin_required
+def assign_instant_wins(raffle_id):
+    """Assign instant win tickets"""
+    try:
+        data = request.get_json()
+        count = data.get('count', 0)
+        
+        if count <= 0:
+            return jsonify({'error': 'Count must be greater than 0'}), 400
             
+        instant_wins, error = InstantWinService.allocate_instant_wins(
+            raffle_id=raffle_id,
+            count=count
+        )
+        
+        if error:
+            return jsonify({'error': error}), 400
+            
+        return jsonify([win.to_dict() for win in instant_wins]), 201
+        
+    except Exception as e:
+        return jsonify({'error': str(e)}), 500
+
+@raffle_admin_bp.route('/raffles/<int:raffle_id>/instant-wins', methods=['GET'])
+@admin_required
+def get_instant_wins(raffle_id):
+    """Get all instant wins for a raffle"""
+    try:
+        instant_wins = InstantWin.query.filter_by(raffle_id=raffle_id).all()
+        return jsonify([win.to_dict() for win in instant_wins])
+        
+    except Exception as e:
+        return jsonify({'error': str(e)}), 500
+
+@raffle_admin_bp.route('/raffles/<int:raffle_id>', methods=['PUT'])
+@admin_required
+def update_raffle(raffle_id):
+    """Update raffle details"""
+    try:
+        data = request.get_json()
+        
         raffle, error = RaffleService.update_raffle(
             raffle_id=raffle_id,
-            data={
-                'prize_pool_id': data['pool_id'],
-                'instant_win_count': data['instant_win_count'],
-                'draw_prize_count': data['draw_prize_count']
-            },
+            data=data,
             admin_id=request.current_user.id
         )
         
@@ -255,67 +233,42 @@ def configure_raffle_prizes(raffle_id):
         return jsonify(raffle.to_dict())
         
     except Exception as e:
-        logger.error(f"Error configuring raffle prizes: {str(e)}")
-        return jsonify({'error': str(e)}), 500
-
-@admin_bp.route('/raffles/<int:raffle_id>/prize-config', methods=['GET'])
-@admin_required
-def get_raffle_prize_config(raffle_id):
-    """Get prize configuration for a raffle"""
-    try:
-        raffle, error = RaffleService.get_raffle(raffle_id)
-        if error:
-            return jsonify({'error': error}), 404
-            
-        config = {
-            'prize_pool_id': raffle.prize_pool_id if hasattr(raffle, 'prize_pool_id') else None,
-            'instant_win_count': raffle.instant_win_count,
-            'draw_prize_count': getattr(raffle, 'draw_prize_count', 0),
-            'total_prize_count': raffle.total_prize_count
-        }
-            
-        return jsonify(config)
-        
-    except Exception as e:
-        logger.error(f"Error getting raffle prize config: {str(e)}")
         return jsonify({'error': str(e)}), 500
     
-@admin_bp.route('/raffles/<int:raffle_id>/link-prize-pool', methods=['POST'])
+@raffle_admin_bp.route('/raffles/<int:raffle_id>/fix-stats', methods=['POST'])
 @admin_required
-def link_raffle_prize_pool(raffle_id):
-    """Link a prize pool to a raffle"""
+def fix_raffle_stats(raffle_id):
+    """Fix user stats discrepancy for a raffle"""
     try:
         data = request.get_json()
-        if not data or 'pool_id' not in data:
-            return jsonify({'error': "pool_id is required"}), 400
-
-        # Get raffle and verify status
-        raffle = RaffleService.get_raffle(raffle_id)[0]
-        if not raffle:
-            return jsonify({'error': "Raffle not found"}), 404
+        user_id = data.get('user_id')
+        
+        if not user_id:
+            return jsonify({'error': 'user_id is required'}), 400
             
-        if raffle.status not in ['draft', 'coming_soon']:
-            return jsonify({'error': "Can only link prize pool in draft or coming soon status"}), 400
-
-        # Update raffle with prize pool configuration
-        configuration = data.get('configuration', {})
-        update_data = {
-            'prize_pool_id': data['pool_id'],
-            'instant_win_count': configuration.get('instant_win_count', 0),
-            'draw_prize_count': configuration.get('draw_prize_count', 0)
-        }
-
-        raffle, error = RaffleService.update_raffle(
-            raffle_id=raffle_id,
-            data=update_data,
-            admin_id=request.current_user.id
+        success, error = TicketService.fix_purchase_count_discrepancy(
+            user_id=user_id,
+            raffle_id=raffle_id
         )
         
         if error:
             return jsonify({'error': error}), 400
             
-        return jsonify(raffle.to_dict())
+        # Get updated stats
+        fixed_stats, _ = PurchaseLimitService.get_user_stats(user_id, raffle_id)
+        if not fixed_stats:
+            return jsonify({'error': 'Could not retrieve updated stats'}), 500
+            
+        return jsonify({
+            'success': True,
+            'fixed_stats': {
+                'user_id': user_id,
+                'raffle_id': raffle_id,
+                'tickets_purchased': fixed_stats.tickets_purchased,
+                'last_purchase_time': fixed_stats.last_purchase_time.isoformat() if fixed_stats.last_purchase_time else None
+            }
+        })
         
     except Exception as e:
-        logger.error(f"Error linking prize pool to raffle: {str(e)}")
+        logger.error(f"Error fixing raffle stats: {str(e)}")
         return jsonify({'error': str(e)}), 500

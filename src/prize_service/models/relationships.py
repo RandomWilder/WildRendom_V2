@@ -3,34 +3,51 @@
 from src.shared import db
 from .prize import Prize
 from .prize_pool import PrizePool
-from .prize_allocation import PrizeAllocation, PrizePoolAllocation
+from .prize_allocation import PrizeAllocation
 
-# Prize Pool to Prize relationship through PrizePoolAllocation
-PrizePool.prizes = db.relationship('Prize',
-    secondary='prize_pool_allocations',
-    backref=db.backref('pools', lazy=True),
+# Prize Pool to Prize relationship (many-to-many through allocations)
+PrizePool.prizes = db.relationship(
+    'Prize',
+    secondary='prize_allocations',
+    back_populates='pools',
+    overlaps="allocations",
+    lazy='dynamic'
+)
+
+Prize.pools = db.relationship(
+    'PrizePool',
+    secondary='prize_allocations',
+    back_populates='prizes',
+    overlaps="prize",
     lazy='dynamic'
 )
 
 # Prize Allocation relationships
-Prize.allocations = db.relationship('PrizeAllocation',
-    backref=db.backref('prize', lazy=True),
+Prize.allocations = db.relationship(
+    'PrizeAllocation',
+    back_populates='prize',
+    overlaps="pools",
     lazy='dynamic'
 )
 
-PrizePool.allocations = db.relationship('PrizeAllocation',
-    backref=db.backref('pool', lazy=True),
+PrizePool.allocations = db.relationship(
+    'PrizeAllocation',
+    back_populates='pool',
+    overlaps="pools,prizes",
     lazy='dynamic'
 )
 
-# Add to models/__init__.py for easy imports
-from .prize import Prize, PrizeType, PrizeStatus, PrizeTier
-from .prize_pool import PrizePool, PoolStatus, AllocationStrategy
-from .prize_allocation import PrizeAllocation, PrizePoolAllocation, AllocationType, ClaimStatus
-from . import relationships
+# Set up bidirectional relationships with proper overlaps
+PrizeAllocation.prize = db.relationship(
+    'Prize',
+    back_populates='allocations',
+    overlaps="pools,prizes",  # Added 'prizes' to handle the warning
+    lazy='joined'  # Using joined loading for better performance
+)
 
-__all__ = [
-    'Prize', 'PrizeType', 'PrizeStatus', 'PrizeTier',
-    'PrizePool', 'PoolStatus', 'AllocationStrategy',
-    'PrizeAllocation', 'PrizePoolAllocation', 'AllocationType', 'ClaimStatus'
-]
+PrizeAllocation.pool = db.relationship(
+    'PrizePool',
+    back_populates='allocations',
+    overlaps="pools,prizes",
+    lazy='joined'  # Using joined loading for better performance
+)

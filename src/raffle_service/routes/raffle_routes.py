@@ -6,9 +6,9 @@ from src.raffle_service.services.ticket_service import TicketService
 from src.raffle_service.services.purchase_limit_service import PurchaseLimitService
 from src.raffle_service.services.instant_win_service import InstantWinService
 from src.raffle_service.models.raffle import RaffleStatus
-from src.raffle_service.models import InstantWin, Ticket
+from src.raffle_service.models import InstantWin, Ticket, Raffle, RaffleStatus
 from src.user_service.services.user_service import UserService
-from datetime import datetime
+from datetime import datetime, timezone, timedelta
 from marshmallow import ValidationError
 
 raffle_bp = Blueprint('raffle', __name__, url_prefix='/api/raffles')
@@ -245,6 +245,137 @@ def get_instant_win_status(raffle_id):
         ).all()
         
         return jsonify([win.to_dict() for win in instant_wins]), 200
+        
+    except Exception as e:
+        return jsonify({'error': str(e)}), 500
+    
+@raffle_bp.route('/<int:raffle_id>/status', methods=['GET'])
+def get_raffle_status(raffle_id):
+    """Get complete raffle status including availability"""
+    try:
+        # Get base raffle info
+        raffle, error = RaffleService.get_raffle(raffle_id)
+        if error:
+            return jsonify({'error': error}), 404
+
+        # Get stats
+        stats, error = TicketService.get_raffle_statistics(raffle_id)
+        if error:
+            return jsonify({'error': error}), 404
+
+        # Combine the data in the format the RaffleCard needs
+        raffle_status = {
+            'id': raffle.id,
+            'title': raffle.title,
+            'ticketPrice': raffle.ticket_price,
+            'availableTickets': stats.get('available_tickets', 0),
+            'totalTickets': raffle.total_tickets,
+            'endTime': raffle.end_time.isoformat() if raffle.end_time else None,
+            'maxTicketsPerUser': raffle.max_tickets_per_user,
+            'status': raffle.status,
+            # Additional useful information
+            'instantWins': {
+                'eligible': stats.get('instant_wins_eligible', 0),
+                'discovered': stats.get('instant_wins_discovered', 0),
+                'claimed': stats.get('instant_wins_claimed', 0)
+            }
+        }
+
+        return jsonify(raffle_status)
+
+    except Exception as e:
+        return jsonify({'error': str(e)}), 500
+    
+@raffle_bp.route('/<int:raffle_id>/details', methods=['GET'])
+def get_raffle_details(raffle_id):
+    """Get complete raffle details including availability (public endpoint)"""
+    try:
+        # Get base raffle info
+        raffle, error = RaffleService.get_raffle(raffle_id)
+        if error:
+            return jsonify({'error': error}), 404
+
+        # Get stats
+        stats, error = TicketService.get_raffle_statistics(raffle_id)
+        if error:
+            return jsonify({'error': error}), 404
+
+        # Format response following the established structure
+        response = {
+            'raffle_id': raffle.id,
+            'title': raffle.title,
+            'status': raffle.status,
+            'ticket_price': raffle.ticket_price,
+            'tickets': {
+                'total': raffle.total_tickets,
+                'sold': stats.get('sold_tickets', 0),
+                'available': stats.get('available_tickets', raffle.total_tickets),  # Default to total if none sold
+                'instant_win_eligible': stats.get('eligible_tickets', 0),
+                'instant_wins_discovered': stats.get('instant_wins_discovered', 0),
+                'instant_wins_claimed': stats.get('instant_wins_claimed', 0)
+            },
+            'timing': {
+                'end_time': raffle.end_time.isoformat() if raffle.end_time else None,
+                'claim_deadlines': {
+                    'instant_win': (raffle.end_time + timedelta(hours=2)).isoformat() if raffle.end_time else None,
+                    'draw_win': (raffle.end_time + timedelta(days=14)).isoformat() if raffle.end_time else None
+                }
+            },
+            'limits': {
+                'max_tickets_per_user': raffle.max_tickets_per_user
+            }
+        }
+
+        return jsonify(response)
+
+    except Exception as e:
+        return jsonify({'error': str(e)}), 500
+    
+@raffle_bp.route('/display', methods=['GET'])
+def get_raffles_display():
+    """Get raffles for display with complete information"""
+    try:
+        current_time = datetime.now(timezone.utc)
+        three_days_ago = current_time - timedelta(days=3)
+        
+        # Get eligible raffles
+        raffles = Raffle.query.filter(
+            (Raffle.status.in_(['active', 'coming_soon'])) |
+            ((Raffle.status == 'ended') & (Raffle.end_time >= three_days_ago))
+        ).all()
+        
+        display_raffles = []
+        
+        for raffle in raffles:
+            # Get stats for each raffle
+            stats, _ = TicketService.get_raffle_statistics(raffle.id)
+            
+            display_raffles.append({
+                'id': raffle.id,
+                'title': raffle.title,
+                'description': raffle.description,
+                'ticket_price': raffle.ticket_price,
+                'status': raffle.status,
+                'start_time': raffle.start_time.isoformat(),
+                'end_time': raffle.end_time.isoformat(),
+                'tickets': {
+                    'total': raffle.total_tickets,
+                    'available': stats.get('available_tickets', 0),
+                    'sold': stats.get('sold_tickets', 0),
+                    'instant_win_eligible': stats.get('eligible_tickets', 0),
+                    'instant_wins_discovered': stats.get('instant_wins_found', 0),
+                    'instant_wins_claimed': stats.get('instant_wins_claimed', 0)
+                },
+                'limits': {
+                    'max_tickets_per_user': raffle.max_tickets_per_user
+                },
+                'claim_deadlines': {
+                    'instant_win': (raffle.end_time + timedelta(hours=2)).isoformat(),
+                    'draw_win': (raffle.end_time + timedelta(days=14)).isoformat()
+                }
+            })
+        
+        return jsonify(display_raffles), 200
         
     except Exception as e:
         return jsonify({'error': str(e)}), 500

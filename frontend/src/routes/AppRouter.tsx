@@ -6,7 +6,7 @@ import SignupForm from '../components/auth/SignupForm';
 import { ProtectedRoute } from '../components/auth/ProtectedRoute';
 import UserDashboard from '../components/dashboard/UserDashboard';
 
-// Temporary placeholder for admin dashboard
+// Placeholder for admin dashboard
 const AdminDashboard = () => <div>Admin Dashboard Coming Soon</div>;
 
 export const AppRouter = () => {
@@ -17,27 +17,12 @@ export const AppRouter = () => {
       <Route path="/signup" element={<SignupForm />} />
       
       {/* Protected user routes */}
-      <Route
-        path="/"
-        element={
-          <ProtectedRoute>
-            <UserDashboard />
-          </ProtectedRoute>
-        }
-      />
+      <Route path="/" element={<ProtectedRoute><UserDashboard /></ProtectedRoute>} />
       
       {/* Protected admin routes */}
-      <Route
-        path="/admin/*"
-        element={
-          <ProtectedRoute requireAdmin>
-            <AdminDashboard />
-          </ProtectedRoute>
-        }
-      />
-
-      {/* Landing page redirect */}
-      <Route path="/home" element={<Navigate to="/" replace />} />
+      <Route path="/admin" element={<ProtectedRoute requireAdmin><AdminDashboard /></ProtectedRoute>}>
+        <Route index element={<AdminDashboard />} />
+      </Route>
       
       {/* Catch all route */}
       <Route path="*" element={<Navigate to="/" replace />} />

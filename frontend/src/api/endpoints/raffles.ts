@@ -1,4 +1,5 @@
 import apiClient from '../client';
+import { cacheService, CacheDuration } from '../../services/cacheService';
 
 export enum RaffleStatus {
   DRAFT = 'draft',
@@ -23,7 +24,6 @@ export interface Raffle {
   status: RaffleStatus;
 }
 
-// Interface matching API response format
 interface RaffleApiResponse {
   id: number;
   title: string;
@@ -38,16 +38,21 @@ interface RaffleApiResponse {
   prize_pool_id?: number;
 }
 
-// Transform function to convert snake_case to camelCase
+const CACHE_KEYS = {
+  activeRaffles: 'raffles:active',
+  raffleDetails: (id: number) => `raffle:${id}`,
+  raffleStats: (id: number) => `raffle:${id}:stats`
+};
+
 const transformRaffle = (raffle: RaffleApiResponse): Raffle => ({
   id: raffle.id,
   title: raffle.title,
   description: raffle.description,
   ticketPrice: raffle.ticket_price,
   totalTickets: raffle.total_tickets,
-  availableTickets: raffle.available_tickets || raffle.total_tickets, // fallback if not provided
+  availableTickets: raffle.available_tickets || raffle.total_tickets,
   maxTicketsPerUser: raffle.max_tickets_per_user,
-  startTime: raffle.start_time || raffle.end_time, // fallback to end_time if not provided
+  startTime: raffle.start_time || raffle.end_time,
   endTime: raffle.end_time,
   status: raffle.status as RaffleStatus
 });
@@ -55,22 +60,29 @@ const transformRaffle = (raffle: RaffleApiResponse): Raffle => ({
 const raffleEndpoints = {
   getActiveRaffles: async (): Promise<Raffle[]> => {
     try {
-      console.log('Making request to /raffles endpoint');
+      // Check cache first
+      const cached = cacheService.get<Raffle[]>(CACHE_KEYS.activeRaffles);
+      if (cached) {
+        console.log('Returning cached raffles');
+        return cached;
+      }
+
+      console.log('Fetching fresh raffles data');
       const { data } = await apiClient.get<RaffleApiResponse[]>('/raffles', {
-        params: {
-          status: RaffleStatus.ACTIVE
-        }
+        params: { status: RaffleStatus.ACTIVE }
       });
-      
-      console.log('Raw API response:', data);
-      
-      // Transform each raffle to match our interface
+
+      // Transform and cache the data
       const transformedRaffles = Array.isArray(data) 
         ? data.map(transformRaffle)
         : [];
 
-      console.log('Transformed raffles:', transformedRaffles);
-      
+      cacheService.set(
+        CACHE_KEYS.activeRaffles,
+        transformedRaffles,
+        CacheDuration.SHORT // 30 seconds
+      );
+
       return transformedRaffles;
     } catch (error) {
       console.error('Raffle endpoint error:', error);
@@ -79,13 +91,35 @@ const raffleEndpoints = {
   },
 
   getRaffle: async (id: number): Promise<Raffle> => {
+    const cacheKey = CACHE_KEYS.raffleDetails(id);
+    const cached = cacheService.get<Raffle>(cacheKey);
+    if (cached) return cached;
+
     const { data } = await apiClient.get<RaffleApiResponse>(`/raffles/${id}`);
-    return transformRaffle(data);
+    const transformed = transformRaffle(data);
+    
+    cacheService.set(cacheKey, transformed, CacheDuration.SHORT);
+    return transformed;
   },
 
   getRaffleStats: async (id: number): Promise<RaffleStats> => {
+    // Stats are not cached due to real-time nature
     const { data } = await apiClient.get<RaffleStats>(`/raffles/${id}/stats`);
     return data;
+  },
+
+  // Subscribe to raffle updates
+  subscribeToRaffle: (id: number, callback: (raffle: Raffle | null) => void) => {
+    return cacheService.subscribe(CACHE_KEYS.raffleDetails(id), callback);
+  },
+
+  // Manually invalidate cache when needed
+  invalidateRaffleCache: (id?: number) => {
+    if (id) {
+      cacheService.invalidate(CACHE_KEYS.raffleDetails(id));
+    } else {
+      cacheService.invalidatePattern(/^raffle:/);
+    }
   }
 };
 

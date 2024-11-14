@@ -1,4 +1,4 @@
-# scripts/safe_migrate.py
+# scripts/create_reservation_migration.py
 import logging
 from pathlib import Path
 from datetime import datetime
@@ -11,7 +11,7 @@ logger = logging.getLogger(__name__)
 def create_migration():
     """Create migration for ticket reservation tables"""
     try:
-        # Setup Flask app and database
+        # Setup Flask app
         app = Flask(__name__)
         project_root = Path(__file__).parent.parent
         app.config.update(
@@ -22,26 +22,23 @@ def create_migration():
         # Initialize database
         from src.shared import db
         db.init_app(app)
-        
-        # Setup migration
         migrate = Migrate(app, db)
         
         with app.app_context():
-            # Import all models
+            # Import models including new reservation models
+            from src.raffle_service.models import (
+                Raffle, Ticket, InstantWin, UserRaffleStats,
+                RaffleStatusChange, TicketReservation, ReservedTicket
+            )
             from src.prize_service.models import Prize, PrizePool, PrizeAllocation
             from src.user_service.models import User
-            from src.raffle_service.models import Raffle, Ticket
             
-            # Create migration
-            from flask_migrate import migrate as create_migration
+            # Create migration with new models
+            from flask_migrate import revision
+            revision(autogenerate=True, message="add ticket reservation tables")
             
-            # Generate migration file
-            create_migration(message="add ticket reservation tables")
             logger.info("Created migration for ticket reservation tables")
-            
-            # Instructions for next steps
-            logger.info("\nMigration created successfully!")
-            logger.info("To apply the migration, run:")
+            logger.info("\nTo apply the migration, run:")
             logger.info("flask db upgrade")
             
             return True

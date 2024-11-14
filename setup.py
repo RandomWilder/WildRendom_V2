@@ -13,6 +13,7 @@ setup(
         'sqlalchemy',
         'alembic',
         'pytest',
-        'pyjwt'
+        'pyjwt',
+        'uuid'  # Added for reservation IDs
     ],
 )

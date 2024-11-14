@@ -8,14 +8,27 @@ export interface RaffleTicket {
   ticketNumber: string;
   raffleTitle: string;
   endTime: string;
+  status: 'available' | 'sold' | 'revealed' | 'claimed';
   isRevealed: boolean;
   instantWin: boolean;
+  instantWinEligible?: boolean;
+  prizeInstance?: {
+    name: string;
+    retailValue: number;
+    cashValue: number;
+    creditValue: number;
+  };
+  onReveal?: () => void;
+  onDiscoverPrize?: () => void;
+  onClaimPrize?: (valueType: 'retail' | 'cash' | 'credit') => void;
 }
 
 export interface RaffleTicketGroupProps {
   raffleTitle: string;
   tickets: RaffleTicket[];
   onReveal?: (ticketId: string) => void;
+  onDiscoverPrize?: (ticketId: string) => void;
+  onClaimPrize?: (ticketId: string, valueType: 'retail' | 'cash' | 'credit') => void;
   className?: string;
 }
 
@@ -23,10 +36,13 @@ export const RaffleTicketGroup = ({
   raffleTitle,
   tickets,
   onReveal,
+  onDiscoverPrize,
+  onClaimPrize,
   className
 }: RaffleTicketGroupProps) => {
   const [isExpanded, setIsExpanded] = useState(true);
   const instantWinCount = tickets.filter(ticket => ticket.instantWin).length;
+  const groupId = `raffle-group-${raffleTitle.toLowerCase().replace(/\s+/g, '-')}`;
 
   return (
     <div className={cn('space-y-4', className)}>
@@ -35,7 +51,7 @@ export const RaffleTicketGroup = ({
           onClick={() => setIsExpanded(!isExpanded)}
           className="flex items-center space-x-2 text-lg font-semibold text-gray-800 hover:text-gray-600 transition-colors"
           aria-expanded={isExpanded}
-          aria-controls={`raffle-group-${raffleTitle.toLowerCase().replace(/\s+/g, '-')}`}
+          aria-controls={groupId}
         >
           {isExpanded ? (
             <ChevronDown className="w-5 h-5" />
@@ -57,7 +73,7 @@ export const RaffleTicketGroup = ({
 
       {isExpanded && (
         <div 
-          id={`raffle-group-${raffleTitle.toLowerCase().replace(/\s+/g, '-')}`}
+          id={groupId}
           className="grid grid-cols-1 gap-4 sm:grid-cols-2 md:grid-cols-3 lg:grid-cols-4"
         >
           {tickets.map((ticket) => (
@@ -66,9 +82,14 @@ export const RaffleTicketGroup = ({
               ticketNumber={ticket.ticketNumber}
               raffleTitle={ticket.raffleTitle}
               endTime={ticket.endTime}
+              status={ticket.status}
               isRevealed={ticket.isRevealed}
               instantWin={ticket.instantWin}
+              instantWinEligible={ticket.instantWinEligible}
+              prizeInstance={ticket.prizeInstance}
               onReveal={onReveal ? () => onReveal(ticket.id) : undefined}
+              onDiscoverPrize={onDiscoverPrize ? () => onDiscoverPrize(ticket.id) : undefined}
+              onClaimPrize={onClaimPrize ? (valueType) => onClaimPrize(ticket.id, valueType) : undefined}
             />
           ))}
         </div>

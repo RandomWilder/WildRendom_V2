@@ -1,89 +1,72 @@
-import { useEffect, useMemo, useState } from 'react';
+import { useEffect, useState, useCallback } from 'react';
 import { Loader2 } from 'lucide-react';
-import { useTicketStore } from '@/lib/stores/ticketStore';
-import { RaffleTicketGroup, RaffleTicket } from './RaffleTicketGroup';
+import { RaffleTicketGroup } from './RaffleTicketGroup';
 import { Button } from '@/components/ui/button';
+import { Alert, AlertDescription } from '@/components/ui/alert';
+import { useTicketStore, Ticket } from '@/lib/stores/ticketStore';
 
-const TICKETS_PER_PAGE = 12;
-
-type StoreTicket = {
-  id: string;
-  ticketId: string;
-  ticketNumber: string;
-  raffleId: number;
-  raffleTitle: string;
-  userId?: number;
-  purchaseTime: string;
-  endTime: string;
-  status: 'available' | 'sold' | 'revealed';
-  isRevealed: boolean;
-  revealTime?: string;
-  instantWin: boolean;
-  transactionId?: number;
-};
-
-export const TicketGrid = () => {
+const TicketGrid = () => {
   const { tickets, isLoading, error, fetchUserTickets, revealTickets } = useTicketStore();
-  const [displayCount, setDisplayCount] = useState(TICKETS_PER_PAGE);
-  
+  const [displayCount, setDisplayCount] = useState(12);
+  const [revealingTickets, setRevealingTickets] = useState<Set<string>>(new Set());
+
   useEffect(() => {
+    console.log('Fetching tickets...');
     fetchUserTickets();
   }, [fetchUserTickets]);
 
-  const groupedTickets = useMemo(() => {
-    const groups: Record<string, RaffleTicket[]> = {};
-    
-    (tickets as StoreTicket[]).slice(0, displayCount).forEach(ticket => {
-      if (!groups[ticket.raffleId]) {
-        groups[ticket.raffleId] = [];
-      }
-      groups[ticket.raffleId].push({
-        id: ticket.id,
-        ticketNumber: ticket.ticketNumber,
-        raffleTitle: ticket.raffleTitle,
-        endTime: ticket.endTime,
-        isRevealed: ticket.isRevealed,
-        instantWin: ticket.instantWin
-      });
-    });
-    
-    return groups;
-  }, [tickets, displayCount]);
+  // Enhanced reveal handler with loading state management
+  const handleReveal = useCallback(async (ticketId: string) => {
+    // Prevent duplicate reveals
+    if (revealingTickets.has(ticketId)) {
+      return;
+    }
 
-  const handleReveal = async (ticketId: string) => {
     try {
+      setRevealingTickets(prev => new Set(prev).add(ticketId));
       await revealTickets([ticketId]);
     } catch (err) {
       console.error('Failed to reveal ticket:', err);
+    } finally {
+      setRevealingTickets(prev => {
+        const next = new Set(prev);
+        next.delete(ticketId);
+        return next;
+      });
     }
-  };
+  }, [revealTickets]);
 
-  const handleLoadMore = () => {
-    setDisplayCount(prev => prev + TICKETS_PER_PAGE);
-  };
+  // Group tickets by raffle
+  const groupedTickets = tickets.slice(0, displayCount).reduce((acc, ticket) => {
+    const raffleId = ticket.raffleId;
+    if (!acc[raffleId]) {
+      acc[raffleId] = [];
+    }
+    acc[raffleId].push({
+      ...ticket,
+      raffleTitle: ticket.raffleTitle || `Raffle #${raffleId}`,
+      status: ticket.status || 'sold',
+      isRevealed: Boolean(ticket.isRevealed),
+      instantWin: Boolean(ticket.instantWin),
+      instantWinEligible: Boolean(ticket.instantWinEligible),
+      endTime: ticket.endTime || new Date().toISOString()
+    });
+    return acc;
+  }, {} as Record<number, Ticket[]>);
 
   if (error) {
     return (
-      <div className="flex items-center justify-center p-8 text-red-500">
-        Error loading tickets: {error}
-      </div>
+      <Alert variant="destructive">
+        <AlertDescription>{error}</AlertDescription>
+      </Alert>
     );
   }
 
-  if (isLoading && !tickets.length) {
+  if (isLoading) {
     return (
       <div className="flex flex-col items-center justify-center p-8 space-y-4">
         <Loader2 className="w-8 h-8 animate-spin text-primary" />
         <p className="text-gray-500">Loading your tickets...</p>
-      </div>
-    );
-  }
-
-  if (!tickets.length) {
-    return (
-      <div className="flex flex-col items-center justify-center p-8 space-y-4">
-        <div className="text-lg font-medium text-gray-600">No tickets yet</div>
-        <p className="text-gray-500">Purchase tickets from active raffles to see them here</p>
       </div>
     );
   }
@@ -93,8 +76,20 @@ export const TicketGrid = () => {
       {Object.entries(groupedTickets).map(([raffleId, raffleTickets]) => (
         <RaffleTicketGroup
           key={raffleId}
-          raffleTitle={raffleTickets[0].raffleTitle}
-          tickets={raffleTickets}
+          raffleTitle={raffleTickets[0]?.raffleTitle || `Raffle #${raffleId}`}
+          tickets={raffleTickets.map(ticket => ({
+            id: ticket.id,
+            ticketId: ticket.ticketId,
+            ticketNumber: ticket.ticketNumber,
+            raffleTitle: ticket.raffleTitle,
+            endTime: ticket.endTime,
+            status: ticket.status,
+            isRevealed: ticket.isRevealed,
+            instantWin: ticket.instantWin,
+            instantWinEligible: ticket.instantWinEligible,
+            prizeInstance: ticket.prizeInstance,
+            isRevealing: revealingTickets.has(ticket.id)
+          }))}
           onReveal={handleReveal}
         />
       ))}
@@ -102,7 +97,7 @@ export const TicketGrid = () => {
       {displayCount < tickets.length && (
         <div className="flex justify-center pt-4">
           <Button
-            onClick={handleLoadMore}
+            onClick={() => setDisplayCount(prev => prev + 12)}
             variant="outline"
             className="min-w-[200px]"
             disabled={isLoading}
@@ -121,3 +116,5 @@ export const TicketGrid = () => {
     </div>
   );
 };
+
+export default TicketGrid;

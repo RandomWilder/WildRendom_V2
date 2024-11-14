@@ -7,6 +7,10 @@ from src.raffle_service.routes.raffle_routes import raffle_bp
 from src.raffle_service.routes.admin_routes import raffle_admin_bp
 from src.prize_service.routes.prize_routes import prize_bp
 from src.prize_service.routes.admin_routes import admin_bp as prize_admin_bp
+from src.raffle_service.routes.reservation_routes import reservation_bp
+from src.raffle_service.routes.payment_routes import payment_bp
+from src.raffle_service.routes.ticket_routes import ticket_bp
+
 
 def create_app(config_name='development'):
     app = Flask(__name__)
@@ -33,8 +37,11 @@ def create_app(config_name='development'):
     app.register_blueprint(raffle_admin_bp)
     app.register_blueprint(prize_bp, url_prefix='/api/prizes')
     app.register_blueprint(prize_admin_bp, url_prefix='/api/admin/prizes')
+    app.register_blueprint(reservation_bp)
+    app.register_blueprint(payment_bp)
+    app.register_blueprint(ticket_bp)
     
-    @app.after_request
+    # CORS handling
     def after_request(response):
         origin = request.headers.get('Origin')
         if origin == 'http://localhost:5175':
@@ -46,12 +53,16 @@ def create_app(config_name='development'):
                 'Access-Control-Expose-Headers': 'Content-Type, Authorization'
             })
         return response
+        
+    app.after_request(after_request)
     
     return app
+
 
 def run_app(host='0.0.0.0', port=5001):
     app = create_app()
     app.run(host=host, port=port)
+
 
 if __name__ == "__main__":
     run_app()

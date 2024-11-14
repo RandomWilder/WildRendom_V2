@@ -4,6 +4,7 @@ from .ticket import Ticket, TicketStatus
 from .instant_win import InstantWin, InstantWinStatus
 from .user_raffle_stats import UserRaffleStats
 from .raffle_status_change import RaffleStatusChange
+from .ticket_reservation import TicketReservation, ReservedTicket, ReservationStatus
 
 __all__ = [
     'Raffle',
@@ -13,5 +14,8 @@ __all__ = [
     'InstantWin',
     'InstantWinStatus',
     'UserRaffleStats',
-    'RaffleStatusChange'
+    'RaffleStatusChange',
+    'TicketReservation',
+    'ReservedTicket',
+    'ReservationStatus'
 ]

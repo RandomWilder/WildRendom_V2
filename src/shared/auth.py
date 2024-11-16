@@ -113,3 +113,16 @@ def admin_required(f):
         request.current_user = current_user
         return f(*args, **kwargs)
     return decorated
+
+def create_token(user_id: int) -> str:
+    """Create a JWT token for the user"""
+    try:
+        payload = {
+            'user_id': user_id,
+            'exp': datetime.utcnow() + timedelta(days=1),
+            'iat': datetime.utcnow()
+        }
+        return jwt.encode(payload, current_app.config['SECRET_KEY'], algorithm='HS256')
+    except Exception as e:
+        print(f"Token creation error: {str(e)}")
+        raise

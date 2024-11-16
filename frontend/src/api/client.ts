@@ -1,29 +1,26 @@
 import axios from 'axios';
 
-// API Configuration
-const API_CONFIG = {
-  baseURL: process.env.NODE_ENV === 'production' 
-    ? 'https://production-url.com/api'
-    : '/api',
-  timeout: 15000,
-  headers: {
-    'Content-Type': 'application/json',
-    'Accept': 'application/json'
-  }
-};
+// Type definitions
+export interface ApiResponse<T = any> {
+  data: T;
+  status: number;
+  headers: Record<string, string>;
+}
 
-// Create axios instance
-export const apiClient = axios.create(API_CONFIG);
+export interface ApiErrorDetails {
+  message?: string;
+  code?: string;
+  details?: unknown;
+  status?: number;
+}
 
-// Error type definition
 export interface ApiError {
   message: string;
   code?: string;
   status?: number;
-  details?: any;
+  details?: unknown;
 }
 
-// Response type for paginated data
 export interface PaginatedResponse<T> {
   data: T[];
   total: number;
@@ -36,28 +33,80 @@ interface ApiErrorResponse {
     data?: {
       message?: string;
       code?: string;
-      details?: any;
+      details?: unknown;
     };
     status?: number;
   };
   message?: string;
-  request?: any;
+  request?: unknown;
 }
 
-// Error handling utility
-export const handleApiError = (rawError: any): ApiError => {
-  const error = rawError as ApiErrorResponse;
+// API Configuration
+const API_CONFIG = {
+  baseURL: process.env.NODE_ENV === 'production' 
+    ? 'https://production-url.com/api'
+    : 'http://localhost:5001',
+  timeout: 15000,
+  headers: {
+    'Content-Type': 'application/json',
+    'Accept': 'application/json'
+  },
+  withCredentials: true
+} as const;
+
+// Create axios instance
+export const apiClient = axios.create(API_CONFIG);
+
+// Request interceptor for debugging in development
+if (process.env.NODE_ENV !== 'production') {
+  apiClient.interceptors.request.use(
+    (config) => {
+      console.log('API Request:', {
+        url: config.url,
+        method: config.method,
+        headers: config.headers
+      });
+      return config;
+    },
+    (error: Error) => {
+      console.error('Request Error:', {
+        message: error.message,
+        name: error.name
+      });
+      return Promise.reject(error);
+    }
+  );
+
+  apiClient.interceptors.response.use(
+    (response) => {
+      console.log('API Response:', {
+        status: response.status,
+        data: response.data
+      });
+      return response;
+    },
+    (error: unknown) => {
+      const err = error as ApiErrorResponse;
+      console.error('Response Error:', err?.response || err);
+      return Promise.reject(error);
+    }
+  );
+}
+
+// Error handling utility with type safety
+export const handleApiError = (error: unknown): ApiError => {
+  const err = error as ApiErrorResponse;
   
-  if (error.response) {
+  if (err?.response) {
     return {
-      message: error.response.data?.message || 'Server error occurred',
-      status: error.response.status,
-      code: error.response.data?.code,
-      details: error.response.data?.details
+      message: err.response.data?.message || 'Server error occurred',
+      status: err.response.status,
+      code: err.response.data?.code,
+      details: err.response.data?.details
     };
   }
 
-  if (error.request) {
+  if (err?.request) {
     return {
       message: 'No response from server. Please check your connection.',
       code: 'NETWORK_ERROR'
@@ -65,7 +114,7 @@ export const handleApiError = (rawError: any): ApiError => {
   }
 
   return {
-    message: error.message || 'Unknown error occurred',
+    message: typeof err?.message === 'string' ? err.message : 'Unknown error occurred',
     code: 'REQUEST_ERROR'
   };
 };

@@ -85,6 +85,7 @@ class PrizeResponseSchema(Schema):
     class Meta:
         unknown = EXCLUDE
 
+    id = fields.Int()
     prize_id = fields.Int()
     name = fields.Str()
     description = fields.Str()

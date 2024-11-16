@@ -51,15 +51,14 @@ def create_prize():
         logger.error(f"Error creating prize: {str(e)}")
         return jsonify({'error': str(e)}), 500
 
-@admin_bp.route('/prizes', methods=['GET'])
+@admin_bp.route('/', methods=['GET'])
 @admin_required
 def list_prizes():
     """Get all prize templates"""
     try:
         prizes = Prize.query.all()
-        return jsonify({
-            'templates': [prize.to_dict() for prize in prizes]
-        })
+        schema = PrizeResponseSchema(many=True)
+        return jsonify(schema.dump(prizes)), 200
     except Exception as e:
         logger.error(f"Error listing prizes: {str(e)}")
         return jsonify({'error': str(e)}), 500

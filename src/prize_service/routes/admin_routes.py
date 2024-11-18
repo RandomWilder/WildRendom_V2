@@ -270,3 +270,26 @@ def get_performance_metrics():
     except Exception as e:
         logger.error(f"Error getting performance metrics: {str(e)}")
         return jsonify({'error': str(e)}), 500
+    
+@admin_bp.route('/pools', methods=['GET'])
+@admin_required
+def list_pools():
+    """Get all prize pools"""
+    try:
+        pools = PrizePool.query.all()
+        return jsonify([{
+            'id': pool.id,
+            'name': pool.name,
+            'status': pool.status,
+            'total_instances': pool.total_instances,
+            'draw_win_count': pool.draw_win_count,          # Verify these property names
+            'instant_win_count': pool.instant_win_count,    # match exactly what UI expects
+            'values': {
+                'retail_total': float(pool.retail_total),
+                'cash_total': float(pool.cash_total),
+                'credit_total': float(pool.credit_total)
+            }
+        } for pool in pools]), 200
+    except Exception as e:
+        logger.error(f"Error listing prize pools: {str(e)}")
+        return jsonify({'error': str(e)}), 500

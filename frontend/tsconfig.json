@@ -17,7 +17,7 @@
     /* Path alias */
     "baseUrl": ".",
     "paths": {
-      "@/*": ["src/*"]
+      "@/*": ["./src/*"]  // Added ./ to make path explicit
     },
 
     /* Linting */

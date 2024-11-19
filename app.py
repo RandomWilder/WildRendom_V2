@@ -1,4 +1,5 @@
-from flask import Flask, request, Response
+# app.py
+from flask import Flask, request, Response, jsonify
 from flask_cors import CORS
 from typing import Optional
 from src.shared import db, migrate
@@ -12,6 +13,8 @@ from src.raffle_service.routes.reservation_routes import reservation_bp
 from src.raffle_service.routes.payment_routes import payment_bp
 from src.raffle_service.routes.ticket_routes import ticket_bp
 from src.user_service.routes.admin_auth_routes import admin_auth_bp
+from src.user_service.routes.tier_routes import tier_bp
+from src.user_service.routes.password_routes import password_bp  # Add this import
 import logging
 
 # Configure logging
@@ -26,7 +29,7 @@ def create_app(config_name: str = 'development') -> Flask:
     # Configure CORS with specific settings
     CORS(app, 
          resources={
-             r"/api/*": {  # Changed to only match /api routes
+             r"/api/*": {
                  "origins": ["http://localhost:5175"],
                  "methods": ["GET", "POST", "PUT", "DELETE", "OPTIONS"],
                  "allow_headers": ["Content-Type", "Authorization", "Accept"],
@@ -50,34 +53,14 @@ def create_app(config_name: str = 'development') -> Flask:
     app.register_blueprint(payment_bp, url_prefix='/api/payments')
     app.register_blueprint(ticket_bp, url_prefix='/api/tickets')
     app.register_blueprint(admin_auth_bp, url_prefix='/api/admin')
+    app.register_blueprint(tier_bp)
+    app.register_blueprint(password_bp)  # Add this line
     
-    @app.after_request
-    def after_request(response: Response) -> Response:
-        """Add CORS headers to response"""
-        origin = request.headers.get('Origin')
-        if origin == 'http://localhost:5175':
-            response.headers.update({
-                'Access-Control-Allow-Origin': origin,
-                'Access-Control-Allow-Headers': 'Content-Type, Authorization, Accept',
-                'Access-Control-Allow-Methods': 'GET, PUT, POST, DELETE, OPTIONS',
-                'Access-Control-Allow-Credentials': 'true',
-                'Access-Control-Expose-Headers': 'Content-Type, Authorization'
-            })
-        return response
-
-    @app.errorhandler(404)
-    def not_found_error(error: Exception) -> tuple[dict, int]:
-        """Handle 404 errors"""
-        logger.error(f"404 error: {error}")
-        return {'error': 'Resource not found'}, 404
-
-    @app.errorhandler(500)
-    def internal_error(error: Exception) -> tuple[dict, int]:
-        """Handle 500 errors"""
-        logger.error(f"500 error: {error}")
-        db.session.rollback()
-        return {'error': 'Internal server error'}, 500
-
+    # Add diagnostics logging for registered routes
+    logger.info("\nRegistered Routes:")
+    for rule in app.url_map.iter_rules():
+        logger.info(f"{rule.endpoint}: {rule.rule}")
+    
     return app
 
 def run_app(host: str = '0.0.0.0', port: int = 5001) -> None:

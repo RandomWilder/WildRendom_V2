@@ -20,15 +20,52 @@ class UserRegistrationSchema(UserBaseSchema):
         unknown = EXCLUDE
 
     password = fields.Str(
-        required=True,
+        required=False,  # Changed to false since Google auth won't need it
         validate=validate.Length(min=8, max=128),
         load_only=True  # Password will not be included in serialized output
     )
 
+    phone_number = fields.Str(
+        required=False,
+        validate=validate.Regexp(
+            r'^\+?[1-9]\d{1,14}$',
+            error="Invalid phone number format. Must start with + and contain 1-15 digits"
+        )
+    )
+
+    auth_provider = fields.Str(
+        required=False,
+        validate=validate.OneOf(['local', 'google']),
+        load_default='local'
+    )
+
+    google_token = fields.Str(
+        required=False,
+        load_only=True  # Token should not be included in output
+    )
+
+    @validates_schema
+    def validate_auth_requirements(self, data, **kwargs):
+        """Validate authentication requirements based on provider"""
+        errors = {}
+        
+        # If using local auth, password is required
+        if data.get('auth_provider', 'local') == 'local':
+            if not data.get('password'):
+                errors['password'] = ["Password is required for local authentication"]
+        
+        # If using Google auth, token is required
+        elif data.get('auth_provider') == 'google':
+            if not data.get('google_token'):
+                errors['google_token'] = ["Google token is required for Google authentication"]
+
+        if errors:
+            raise ValidationError(errors)
+
     @validates_schema
     def validate_password_strength(self, data, **kwargs):
         """Validate password meets security requirements"""
-        if 'password' in data:
+        if 'password' in data and data.get('auth_provider', 'local') == 'local':
             password = data['password']
             errors = []
             
@@ -43,6 +80,21 @@ class UserRegistrationSchema(UserBaseSchema):
                 
             if errors:
                 raise ValidationError({'password': errors})
+
+    @validates_schema
+    def validate_phone_format(self, data, **kwargs):
+        """Clean and validate phone number format"""
+        if 'phone_number' in data and data['phone_number']:
+            # Remove any spaces or special characters except +
+            phone = ''.join(c for c in data['phone_number'] 
+                          if c.isdigit() or c == '+')
+            
+            # Ensure it starts with +
+            if not phone.startswith('+'):
+                phone = '+' + phone
+                
+            # Update the cleaned phone number
+            data['phone_number'] = phone
 
 class UserLoginSchema(Schema):
     """Schema for user login"""
@@ -65,6 +117,13 @@ class UserUpdateSchema(Schema):
         validate=validate.Length(min=8, max=128),
         load_only=True
     )
+    phone_number = fields.Str(
+        required=False,
+        validate=validate.Regexp(
+            r'^\+?[1-9]\d{1,14}$',
+            error="Invalid phone number format. Must start with + and contain 1-15 digits"
+        )
+    )
     current_password = fields.Str(load_only=True, required=False)
 
     @validates_schema
@@ -73,6 +132,21 @@ class UserUpdateSchema(Schema):
             raise ValidationError(
                 'current_password is required when updating password'
             )
+
+    @validates_schema
+    def validate_phone_format(self, data, **kwargs):
+        """Clean and validate phone number format"""
+        if 'phone_number' in data and data['phone_number']:
+            # Remove any spaces or special characters except +
+            phone = ''.join(c for c in data['phone_number'] 
+                          if c.isdigit() or c == '+')
+            
+            # Ensure it starts with +
+            if not phone.startswith('+'):
+                phone = '+' + phone
+                
+            # Update the cleaned phone number
+            data['phone_number'] = phone
 
 class CreditUpdateSchema(Schema):
     """Schema for credit balance updates"""
@@ -103,8 +177,20 @@ class UserResponseSchema(Schema):
     email = fields.Email(required=True)
     first_name = fields.Str()
     last_name = fields.Str()
+    phone_number = fields.Str()  # Added
+    auth_provider = fields.Str()  # Added
+    verification_status = fields.Dict(keys=fields.Str(), values=fields.Boolean())  # Added
     site_credits = fields.Float()
     is_active = fields.Bool()
-    is_verified = fields.Bool()
     created_at = fields.DateTime()
     last_login = fields.DateTime()
+
+# Make sure schemas are available for import
+__all__ = [
+    'UserBaseSchema',
+    'UserRegistrationSchema',
+    'UserLoginSchema',
+    'UserUpdateSchema',
+    'CreditUpdateSchema',
+    'UserResponseSchema'
+]

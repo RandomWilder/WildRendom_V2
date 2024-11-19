@@ -19,7 +19,7 @@ sys.path.append(str(project_root))  # Add project root to Python path
 os.chdir(project_root)  # Change working directory to project root
 
 logging.basicConfig(
-    level=logging.INFO,
+    level=logging.DEBUG,
     format='%(asctime)s - %(levelname)s - %(message)s',
     handlers=[
         logging.StreamHandler(),

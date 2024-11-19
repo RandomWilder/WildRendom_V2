@@ -131,11 +131,29 @@ export const PrizePoolForm = ({
               {errors.name && (
                 <p className="text-sm text-red-500 mt-1">{errors.name}</p>
               )}
+            </div>            
+            <div className="space-y-2">
+                <Label 
+                htmlFor="description" 
+                className="text-sm font-medium text-gray-700"
+                >
+                Description
+                </Label>
+                <textarea
+                id="description"
+                name="description"
+                value={formState.description}
+                onChange={handleChange}
+                rows={3}
+                className="w-full px-3 py-2 border border-gray-300 rounded-md 
+                    focus:ring-2 focus:ring-blue-500 focus:border-blue-500"
+                placeholder="Enter pool description"
+                />
+                {errors.description && (
+                <p className="text-sm text-red-500 mt-1">{errors.description}</p>
+                )}
             </div>
-            
-            {/* Add similar styling to other form fields */}
-          </div>
-
+        </div>
           <DialogFooter className="border-t pt-4 mt-6">
             <Button
               type="button"

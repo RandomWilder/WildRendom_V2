@@ -2,11 +2,12 @@ from typing import Optional, Tuple, Dict, Any
 from datetime import datetime, timezone
 from sqlalchemy.exc import SQLAlchemyError
 from src.shared import db
-from src.user_service.models.user import User
 from src.user_service.models import User, UserStatusChange, CreditTransaction
 from flask import request
 from src.user_service.services.activity_service import ActivityService
+import logging
 
+logger = logging.getLogger(__name__)
 
 class UserService:
     @staticmethod
@@ -21,20 +22,33 @@ class UserService:
             if User.query.filter_by(email=user_data['email']).first():
                 return None, "Email already exists"
             
+            # Check for existing phone number if provided
+            if user_data.get('phone_number') and User.query.filter_by(phone_number=user_data['phone_number']).first():
+                return None, "Phone number already registered"
+            
             user = User(
                 username=user_data['username'],
                 email=user_data['email'],
                 first_name=user_data.get('first_name'),
-                last_name=user_data.get('last_name')
+                last_name=user_data.get('last_name'),
+                phone_number=user_data.get('phone_number'),
+                auth_provider=user_data.get('auth_provider', 'local')
             )
-            user.set_password(user_data['password'])
+
+            if user_data.get('auth_provider') == 'local':
+                user.set_password(user_data['password'])
+            elif user_data.get('auth_provider') == 'google':
+                user.is_verified = True
             
             db.session.add(user)
             db.session.commit()
+
+            logger.info(f"Created user: {user.username} with phone: {user.phone_number}")
             
             return user, None
         except SQLAlchemyError as e:
             db.session.rollback()
+            logger.error(f"Error creating user: {str(e)}")
             return None, str(e)
 
     @staticmethod
@@ -79,7 +93,6 @@ class UserService:
     def update_user(user_id: int, update_data: Dict[str, Any]) -> Tuple[Optional[User], Optional[str]]:
         """Update user profile"""
         try:
-            # Use db.session.get instead of query.get
             user = db.session.get(User, user_id)
             if not user:
                 return None, "User not found"
@@ -98,15 +111,18 @@ class UserService:
                     user.last_name = value
                 elif field == 'password':
                     user.set_password(value)
+                elif field == 'phone_number' and value != user.phone_number:
+                    # Check if new phone number already exists
+                    existing_phone = User.query.filter_by(phone_number=value).first()
+                    if existing_phone and existing_phone.id != user_id:
+                        return None, "Phone number already registered"
+                    user.phone_number = value
             
-            try:
-                db.session.commit()
-                return user, None
-            except SQLAlchemyError as e:
-                db.session.rollback()
-                return None, str(e)
+            db.session.commit()
+            return user, None
             
-        except Exception as e:
+        except SQLAlchemyError as e:
+            db.session.rollback()
             return None, str(e)
 
     @staticmethod
@@ -115,19 +131,17 @@ class UserService:
                       reference_id: str = None, notes: str = None) -> Tuple[Optional[User], Optional[str]]:
         """Update user's credit balance and record the transaction"""
         try:
-            # Use db.session.get instead of query.get
             user = db.session.get(User, user_id)
             if not user:
                 return None, "User not found"
             
             if transaction_type == 'subtract':
-                amount = -abs(amount)  # Ensure amount is negative
+                amount = -abs(amount)
                 if user.site_credits + amount < 0:
                     return None, "Insufficient credits"
             else:
-                amount = abs(amount)  # Ensure amount is positive
+                amount = abs(amount)
             
-            # Record the transaction
             transaction = CreditTransaction(
                 user_id=user.id,
                 amount=amount,
@@ -139,7 +153,6 @@ class UserService:
                 created_by_id=admin_id if admin_id else user_id
             )
             
-            # Update user's balance
             user.site_credits += amount
             
             db.session.add(transaction)
@@ -172,11 +185,9 @@ class UserService:
             if not admin or not admin.is_admin:
                 return None, "Invalid admin user"
                 
-            # Don't allow deactivating admin users
             if user.is_admin and not is_active:
                 return None, "Cannot deactivate admin users"
                 
-            # Record status change
             status_change = UserStatusChange(
                 user_id=user.id,
                 changed_by_id=admin_id,
@@ -185,7 +196,6 @@ class UserService:
                 reason=reason
             )
             
-            # Update user status
             user.is_active = is_active
             
             db.session.add(status_change)
@@ -219,3 +229,6 @@ class UserService:
             return [t.to_dict() for t in transactions], None
         except SQLAlchemyError as e:
             return None, str(e)
+
+# Make sure UserService is available for import
+__all__ = ['UserService']
